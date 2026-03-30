@@ -316,7 +316,7 @@ apply_conf_with_rollback() {
 }
 
 add_reverse_proxy() {
-  local domain listen_port backend_port target tmp
+  local domain listen_port backend_port target tmp auto_https
 
   read -rp "请输入域名（如 example.com）: " domain
   if ! valid_domain "$domain"; then
@@ -347,6 +347,23 @@ add_reverse_proxy() {
   build_proxy_conf "$domain" "$listen_port" "$backend_port" "$tmp"
   if apply_conf_with_rollback "$tmp" "$target"; then
     info "反向代理配置已生效：${target}"
+
+    if confirm "是否立即自动申请证书并启用 HTTPS（80 强制跳转 443）？"; then
+      # 在当前界面直接设置/保存邮箱（若未设置）
+      if ! ensure_email_interactive; then
+        warn "邮箱未设置成功，已跳过自动证书流程。你可稍后在证书管理里设置。"
+      else
+        if issue_cert_for_domain "$domain"; then
+          if enable_https_for_domain_value "$domain"; then
+            info "已完成：反向代理 + 自动证书 + 自动 HTTPS。"
+          else
+            warn "证书已申请成功，但启用 HTTPS 失败，请检查配置后重试。"
+          fi
+        else
+          warn "自动证书申请失败，当前仅保留 HTTP 反向代理配置。"
+        fi
+      fi
+    fi
   fi
   rm -f "$tmp"
 }
@@ -609,6 +626,25 @@ set_acme_email() {
   save_email "$email"
 }
 
+ensure_email_interactive() {
+  # 若未设置邮箱，允许在当前界面直接录入并保存
+  load_email
+  if [[ -n "${ACME_EMAIL:-}" ]]; then
+    return 0
+  fi
+
+  warn "当前未设置 Acme 邮箱。"
+  read -rp "请输入邮箱（将保存到 ${EMAIL_CONF}）: " email
+  if [[ ! "$email" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
+    error "邮箱格式不合法。"
+    return 1
+  fi
+
+  save_email "$email"
+  # shellcheck disable=SC2034
+  ACME_EMAIL="$email"
+}
+
 issue_cert() {
   local domain
   load_email
@@ -644,6 +680,36 @@ issue_cert() {
   info "证书申请并安装成功。"
 }
 
+issue_cert_for_domain() {
+  # 参数：域名；用于“添加反向代理后自动申请证书”场景
+  local domain="$1"
+  load_email
+
+  if [[ -z "${ACME_EMAIL:-}" ]]; then
+    error "未设置邮箱，无法自动申请证书。"
+    return 1
+  fi
+
+  ensure_acme_installed || return 1
+
+  note "开始为 ${domain} 自动申请证书（HTTP 验证）..."
+  "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
+  "$HOME/.acme.sh/acme.sh" --register-account -m "$ACME_EMAIL" >/dev/null 2>&1 || true
+
+  if ! "$HOME/.acme.sh/acme.sh" --issue -d "$domain" --webroot /usr/share/nginx/html; then
+    error "自动申请证书失败，请确认域名解析和 80 端口可访问。"
+    return 1
+  fi
+
+  ${SUDO} mkdir -p "${SSL_DIR}/${domain}"
+  "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
+    --key-file "${SSL_DIR}/${domain}/privkey.pem" \
+    --fullchain-file "${SSL_DIR}/${domain}/fullchain.pem"
+
+  ensure_acme_cron
+  info "证书申请并安装成功。已开启自动续期任务。"
+}
+
 cert_list_and_renew_check() {
   local base="$HOME/.acme.sh"
   if [[ ! -d "$base" ]]; then
@@ -658,6 +724,12 @@ cert_list_and_renew_check() {
 enable_https_for_domain() {
   local domain conf_file ssl_conf tmp
   read -rp "请输入要启用 HTTPS 的域名（对应 conf 文件名）: " domain
+  enable_https_for_domain_value "$domain"
+}
+
+enable_https_for_domain_value() {
+  # 参数：域名
+  local domain="$1" conf_file ssl_conf tmp
   conf_file="${CONF_DIR}/${domain}.conf"
 
   if [[ ! -f "$conf_file" ]]; then
