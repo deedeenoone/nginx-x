@@ -37,13 +37,13 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/ins
 
 ## 当前功能
 
-1. **安装 Nginx**
+1. **安装Nginx**
    - 自动检查是否已安装 Nginx
    - 未安装时自动安装依赖：`curl` `wget` `socat` `cron`
    - 自动安装 Nginx 官方 stable 版本
    - 自动创建证书目录：`/etc/nginx/ssl/`
 
-2. **升级 Nginx**
+2. **升级Nginx**
    - 对比本地版本与 Nginx 官网最新版本
    - 有新版本时先备份 `/etc/nginx/`，再执行升级
    - 升级后自动校验并平滑重载
