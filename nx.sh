@@ -1148,8 +1148,8 @@ banner() {
 }
 
 main_menu() {
-  echo "1) 安装 Nginx"
-  echo "2) 升级 Nginx"
+  echo "1) 安装Nginx"
+  echo "2) 升级Nginx"
   echo "3) 添加配置"
   echo "4) 配置列表"
   echo "5) 证书管理"
