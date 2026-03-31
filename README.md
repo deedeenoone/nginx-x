@@ -68,7 +68,7 @@ nx
 
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/quick-install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/install.sh)"
 ```
 
 说明：
@@ -84,4 +84,3 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/qui
   - 绿色：成功
   - 黄色：警告
   - 红色：错误
-
