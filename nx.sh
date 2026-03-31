@@ -895,6 +895,23 @@ ensure_acme_cron() {
   fi
 }
 
+has_acme_cron_task() {
+  crontab -l 2>/dev/null | grep -q 'acme.sh --cron'
+}
+
+disable_acme_cron() {
+  if has_acme_cron_task; then
+    crontab -l 2>/dev/null | grep -v 'acme.sh --cron' | crontab - || true
+    info "已关闭自动续期任务。"
+  else
+    warn "当前未检测到自动续期任务。"
+  fi
+}
+
+enable_acme_cron() {
+  ensure_acme_cron
+}
+
 set_acme_email() {
   local email
   read -rp "请输入证书通知邮箱: " email
@@ -1047,25 +1064,122 @@ issue_cert_for_domain() {
   info "证书申请并安装成功。已开启自动续期任务。"
 }
 
-cert_list_and_renew_check() {
-  echo "证书列表："
+cert_list_action_menu() {
+  local domain="$1"
+  while true; do
+    clear
+    echo "====== 证书操作：${domain} ======"
+    echo "1) 重新申请"
+    echo "2) 启停续期"
+    echo "3) 删除证书"
+    echo "0) 返回上一级"
+    echo "============================="
+    read -rp "请选择: " c
 
-  # 优先使用 acme.sh 官方列表输出，避免按目录后缀匹配导致漏显示（如 .pp.ua 等）
-  if [[ -x "$HOME/.acme.sh/acme.sh" ]]; then
-    local list_out
-    list_out="$($HOME/.acme.sh/acme.sh --list 2>/dev/null || true)"
+    case "$c" in
+      1)
+        load_email
+        if [[ -z "${ACME_EMAIL:-}" ]]; then
+          if ! ensure_email_interactive; then
+            error "邮箱未设置，无法重新申请。"
+            pause
+            return 1
+          fi
+        fi
+        issue_cert_for_domain "$domain"
+        pause
+        return 0
+        ;;
+      2)
+        if has_acme_cron_task; then
+          if confirm "当前续期任务已开启，是否关闭？"; then
+            disable_acme_cron
+          fi
+        else
+          if confirm "当前续期任务未开启，是否开启？"; then
+            enable_acme_cron
+          fi
+        fi
+        pause
+        return 0
+        ;;
+      3)
+        if ! confirm "确认删除证书 ${domain} ?"; then
+          info "已取消。"
+          pause
+          return 0
+        fi
 
-    # acme.sh --list 通常首行为表头，后续行为证书记录
-    if [[ -n "$list_out" ]] && [[ "$(echo "$list_out" | wc -l)" -gt 1 ]]; then
-      echo "$list_out"
-    else
-      warn "当前未发现已签发证书。"
-    fi
-  else
+        if [[ -x "$HOME/.acme.sh/acme.sh" ]]; then
+          "$HOME/.acme.sh/acme.sh" --remove -d "$domain" >/dev/null 2>&1 || true
+        fi
+        rm -rf "$HOME/.acme.sh/${domain}" "$HOME/.acme.sh/${domain}_ecc" 2>/dev/null || true
+        ${SUDO} rm -rf "${SSL_DIR}/${domain}" 2>/dev/null || true
+        info "证书已删除：${domain}"
+        pause
+        return 0
+        ;;
+      0) return 0 ;;
+      *) warn "无效输入。"; pause ;;
+    esac
+  done
+}
+
+cert_list_menu() {
+  if [[ ! -x "$HOME/.acme.sh/acme.sh" ]]; then
     warn "未检测到 acme.sh，请先申请证书。"
+    return 1
   fi
 
-  ensure_acme_cron
+  local -a certs
+  local line domain idx renew_status
+  mapfile -t certs < <(
+    "$HOME/.acme.sh/acme.sh" --list 2>/dev/null | awk 'NR>1 && NF>0 {print $1}'
+  )
+
+  if [[ ${#certs[@]} -eq 0 ]]; then
+    warn "当前未发现已签发证书。"
+    return 0
+  fi
+
+  while true; do
+    clear
+    echo "========== 证书列表 =========="
+    if has_acme_cron_task; then
+      renew_status="已开启"
+    else
+      renew_status="未开启"
+    fi
+
+    for i in "${!certs[@]}"; do
+      echo "$((i+1))) ${certs[$i]}  [续期任务: ${renew_status}]"
+    done
+    echo "0) 返回上一级"
+    echo "============================"
+    read -rp "请输入证书编号: " idx
+
+    if [[ "$idx" == "0" ]]; then
+      return 0
+    fi
+    if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#certs[@]} )); then
+      warn "无效编号。"
+      pause
+      continue
+    fi
+
+    domain="${certs[$((idx-1))]}"
+    cert_list_action_menu "$domain"
+
+    # 操作后刷新证书列表
+    mapfile -t certs < <(
+      "$HOME/.acme.sh/acme.sh" --list 2>/dev/null | awk 'NR>1 && NF>0 {print $1}'
+    )
+    if [[ ${#certs[@]} -eq 0 ]]; then
+      warn "当前已无证书。"
+      pause
+      return 0
+    fi
+  done
 }
 
 enable_https_for_domain() {
@@ -1245,7 +1359,7 @@ cert_menu() {
     echo "========== 证书管理（acme.sh） =========="
     echo "1) 设置邮箱"
     echo "2) 申请证书"
-    echo "3) 证书列表与续期检查"
+    echo "3) 证书列表"
     echo "4) 启用证书（HTTPS 强制跳转）"
     echo "0) 返回上一级"
     echo "========================================"
@@ -1254,7 +1368,7 @@ cert_menu() {
     case "$c" in
       1) set_acme_email; pause ;;
       2) issue_cert; pause ;;
-      3) cert_list_and_renew_check; pause ;;
+      3) cert_list_menu; pause ;;
       4) enable_https_for_domain; pause ;;
       0) return 0 ;;
       *) warn "无效输入。"; pause ;;
