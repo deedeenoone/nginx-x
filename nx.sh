@@ -285,6 +285,13 @@ server {
     listen ${listen_port};
     server_name ${domain};
 
+    # ACME HTTP-01 验证路径（证书申请/续期）
+    location ^~ /.well-known/acme-challenge/ {
+        root /usr/share/nginx/html;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:${backend_port};
         proxy_http_version 1.1;
@@ -761,6 +768,40 @@ ensure_email_interactive() {
   ACME_EMAIL="$email"
 }
 
+ensure_acme_location_for_domain_conf() {
+  # 为已存在的反代配置补齐 ACME 验证 location，避免申请证书时被反代到后端
+  local domain="$1"
+  local conf_file="${CONF_DIR}/${domain}.conf"
+  local tmp_file
+
+  [[ -f "$conf_file" ]] || return 0
+
+  if grep -q '/\.well-known/acme-challenge/' "$conf_file"; then
+    return 0
+  fi
+
+  tmp_file="/tmp/nginxx-acme-loc-${domain}.conf"
+  awk '
+    BEGIN{inserted=0}
+    {
+      if (inserted==0 && $0 ~ /^[[:space:]]*location \/ \{/ ) {
+        print "    # ACME HTTP-01 验证路径（证书申请/续期）"
+        print "    location ^~ /.well-known/acme-challenge/ {"
+        print "        root /usr/share/nginx/html;"
+        print "        default_type \"text/plain\";"
+        print "        try_files $uri =404;"
+        print "    }"
+        print ""
+        inserted=1
+      }
+      print $0
+    }
+  ' "$conf_file" > "$tmp_file"
+
+  ${SUDO} cp -a "$tmp_file" "$conf_file"
+  rm -f "$tmp_file"
+}
+
 issue_cert() {
   local domain
   load_email
@@ -775,6 +816,8 @@ issue_cert() {
     error "域名格式不合法。"
     return 1
   fi
+
+  ensure_acme_location_for_domain_conf "$domain"
 
   ensure_acme_installed || return 1
 
@@ -805,6 +848,8 @@ issue_cert_for_domain() {
     error "未设置邮箱，无法自动申请证书。"
     return 1
   fi
+
+  ensure_acme_location_for_domain_conf "$domain"
 
   ensure_acme_installed || return 1
 
@@ -879,6 +924,14 @@ enable_https_for_domain_value() {
 server {
     listen 80;
     server_name ${domain};
+
+    # 保留 ACME 验证路径，避免被 301 跳转影响签发/续期
+    location ^~ /.well-known/acme-challenge/ {
+        root /usr/share/nginx/html;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+
     return 301 https://\$host\$request_uri;
 }
 
