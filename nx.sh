@@ -1163,7 +1163,7 @@ main() {
       3) add_reverse_proxy; pause ;;
       4) config_manage_menu ;;
       5) cert_menu ;;
-      6) show_nginx_realtime_status; pause ;;
+      6) show_nginx_realtime_status ;;
       7) uninstall_menu ;;
       0) info "已退出 ${APP_NAME}。"; exit 0 ;;
       *) warn "无效输入，请输入菜单编号。"; pause ;;
