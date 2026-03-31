@@ -997,11 +997,11 @@ RX: ${rx_rate} MB/s
 TX: ${tx_rate} MB/s
 
 ==============================
-按回车返回（每秒自动刷新）
+按回车返回（每5秒自动刷新）
 EOF
 
-    # 每秒刷新；检测到任意键输入则退出
-    if read -r -s -n 1 -t 1 _key; then
+    # 每5秒刷新；检测到任意键输入则退出
+    if read -r -s -n 1 -t 5 _key; then
       break
     fi
   done
