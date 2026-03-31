@@ -310,6 +310,51 @@ server {
 EOF
 }
 
+build_external_proxy_conf() {
+  local domain="$1"
+  local listen_port="$2"
+  local upstream_url="$3"
+  local out="$4"
+
+  cat > "$out" <<EOF
+# managed_by=Nginx-X
+# mode=external
+# domain=${domain}
+# listen_port=${listen_port}
+# upstream_url=${upstream_url}
+
+server {
+    listen ${listen_port};
+    server_name ${domain};
+
+    # ACME HTTP-01 验证路径（证书申请/续期）
+    location ^~ /.well-known/acme-challenge/ {
+        root /usr/share/nginx/html;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+
+    location / {
+        proxy_pass ${upstream_url};
+        proxy_http_version 1.1;
+
+        # 外部上游建议保留 SNI
+        proxy_ssl_server_name on;
+
+        proxy_set_header Host \$proxy_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
+
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+}
+
 apply_conf_with_rollback() {
   # 参数：临时文件、目标文件
   local tmp_conf="$1"
@@ -404,6 +449,70 @@ add_reverse_proxy() {
       fi
     fi
   fi
+  rm -f "$tmp"
+}
+
+add_external_url_proxy() {
+  local domain listen_port upstream_url target tmp
+
+  require_nginx_installed || return 1
+
+  read -rp "请输入域名（如 example.com）: " domain
+  if ! valid_domain "$domain"; then
+    error "域名格式不合法。"
+    return 1
+  fi
+
+  read -rp "请输入监听端口（如 80/8080）: " listen_port
+  if ! valid_port "$listen_port"; then
+    error "监听端口不合法。"
+    return 1
+  fi
+
+  read -rp "请输入外部上游 URL（http/https）: " upstream_url
+  if [[ ! "$upstream_url" =~ ^https?:// ]]; then
+    error "上游 URL 格式不合法，必须以 http:// 或 https:// 开头。"
+    return 1
+  fi
+
+  if is_port_used_os "$listen_port"; then
+    warn "监听端口 ${listen_port} 当前已被占用（Nginx 多站点场景通常可复用）。"
+    if ! confirm "是否继续写入配置并交由 nginx -t 校验？"; then
+      info "已取消添加配置。"
+      return 0
+    fi
+
+    if [[ "$listen_port" == "443" ]] && [[ ! -f "${SSL_DIR}/${domain}/fullchain.pem" || ! -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
+      warn "检测到 443 端口复用且当前域名证书不存在，已自动改为先使用 80 端口创建配置。"
+      warn "后续可在同流程自动申请证书并启用 HTTPS。"
+      listen_port="80"
+    fi
+  fi
+
+  target="${CONF_DIR}/${domain}.conf"
+  tmp="/tmp/nginxx-external-${domain}.conf"
+
+  build_external_proxy_conf "$domain" "$listen_port" "$upstream_url" "$tmp"
+  if apply_conf_with_rollback "$tmp" "$target"; then
+    info "外部URL反代配置已生效：${target}"
+
+    if confirm "是否立即自动申请证书并启用 HTTPS（80 强制跳转 443）？"; then
+      if ! ensure_email_interactive; then
+        warn "邮箱未设置成功，已跳过自动证书流程。你可稍后在证书管理里设置。"
+      else
+        if issue_cert_for_domain "$domain"; then
+          if enable_https_for_domain_value "$domain"; then
+            info "已完成：外部URL反代 + 自动证书 + 自动 HTTPS。"
+          else
+            warn "证书已申请成功，但启用 HTTPS 失败，请检查配置后重试。"
+          fi
+        else
+          warn "自动证书申请失败，当前仅保留 HTTP 反代配置。"
+        fi
+      fi
+    fi
+  fi
+
   rm -f "$tmp"
 }
 
@@ -697,14 +806,16 @@ config_entry_menu() {
     clear
     echo "========== 配置管理 =========="
     echo "1) 添加配置"
-    echo "2) 配置列表"
+    echo "2) 外部URL反代"
+    echo "3) 配置列表"
     echo "0) 返回上一级"
     echo "=============================="
     read -rp "请选择: " c
 
     case "$c" in
       1) add_reverse_proxy; pause ;;
-      2) config_manage_menu ;;
+      2) add_external_url_proxy; pause ;;
+      3) config_manage_menu ;;
       0) return 0 ;;
       *) warn "无效输入。"; pause ;;
     esac
@@ -984,7 +1095,7 @@ server {
     ssl_prefer_server_ciphers off;
 
     location / {
-        proxy_pass http://127.0.0.1:3000;
+        proxy_pass __UPSTREAM_PLACEHOLDER__;
         proxy_http_version 1.1;
 
         proxy_set_header Host \$host;
@@ -1000,12 +1111,11 @@ server {
 }
 EOF
 
-  # 若原配置里能找到 proxy_pass 端口，自动复用
-  local existing_backend
-  existing_backend="$(grep -Eo 'proxy_pass http://127\.0\.0\.1:[0-9]+' "$conf_file" | head -n1 | awk -F: '{print $NF}' || true)"
-  if [[ -n "$existing_backend" ]]; then
-    sed -i "s/proxy_pass http:\/\/127.0.0.1:3000;/proxy_pass http:\/\/127.0.0.1:${existing_backend};/" "$tmp"
-  fi
+  # 复用原配置的 proxy_pass（支持本地端口和外部URL）
+  local existing_upstream
+  existing_upstream="$(grep -Eo 'proxy_pass [^;]+' "$conf_file" | head -n1 | sed 's/^proxy_pass //')"
+  [[ -z "$existing_upstream" ]] && existing_upstream="http://127.0.0.1:3000"
+  sed -i "s|proxy_pass __UPSTREAM_PLACEHOLDER__;|proxy_pass ${existing_upstream};|" "$tmp"
 
   if apply_conf_with_rollback "$tmp" "$conf_file"; then
     info "HTTPS 已启用，且已配置 80 -> 443 强制跳转。"
