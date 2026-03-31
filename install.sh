@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_URL="https://github.com/Xiuyixx/Nginx-X.git"
 INSTALL_DIR="/opt/Nginx-X"
 TARGET_BIN="/usr/local/bin/nx"
+NO_RUN="0"
 
 SUDO=""
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -58,7 +59,7 @@ install_local() {
   echo "[OK] Installed. You can now run: nx"
 
   # 如果当前在交互终端，安装后直接进入菜单，免去手动再输入 nx
-  if [[ -t 0 && -t 1 ]]; then
+  if [[ "$NO_RUN" != "1" && -t 0 && -t 1 ]]; then
     read -rp "是否立即启动 Nginx-X？[Y/n]: " run_now
     if [[ -z "$run_now" || "$run_now" =~ ^[Yy]$ ]]; then
       exec "$TARGET_BIN"
@@ -80,11 +81,16 @@ bootstrap_install() {
     ${SUDO} git clone "$REPO_URL" "$INSTALL_DIR"
   fi
 
-  # 进入安装目录执行同一个 install.sh（此时会走本地安装逻辑）
-  ${SUDO} bash "$INSTALL_DIR/install.sh"
+  # 进入安装目录执行同一个 install.sh（仅安装，不在子进程里启动 nx）
+  ${SUDO} bash "$INSTALL_DIR/install.sh" --no-run
 
-  echo "[OK] 安装完成，正在启动 Nginx-X..."
-  exec "$TARGET_BIN"
+  if [[ -t 0 && -t 1 ]]; then
+    read -rp "是否立即启动 Nginx-X？[Y/n]: " run_now
+    if [[ -z "$run_now" || "$run_now" =~ ^[Yy]$ ]]; then
+      echo "[OK] 安装完成，正在启动 Nginx-X..."
+      exec "$TARGET_BIN"
+    fi
+  fi
 }
 
 get_script_dir() {
@@ -111,6 +117,14 @@ has_local_nx() {
   script_dir="$(get_script_dir)"
   [[ -f "${script_dir}/nx.sh" ]]
 }
+
+for arg in "$@"; do
+  case "$arg" in
+    --no-run)
+      NO_RUN="1"
+      ;;
+  esac
+done
 
 # 统一入口：
 # - 在仓库目录执行（存在 nx.sh）=> 本地安装
