@@ -31,7 +31,7 @@ install_git_if_needed() {
 
 install_local() {
   local script_dir source_script
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  script_dir="$(get_script_dir)"
   source_script="${script_dir}/nx.sh"
 
   if [[ ! -f "$source_script" ]]; then
@@ -40,6 +40,13 @@ install_local() {
   fi
 
   chmod +x "$source_script"
+
+  # 兼容极简系统：确保 /usr/local/bin 存在
+  if [[ $EUID -ne 0 ]]; then
+    sudo mkdir -p "$(dirname "$TARGET_BIN")"
+  else
+    mkdir -p "$(dirname "$TARGET_BIN")"
+  fi
 
   if [[ $EUID -ne 0 ]]; then
     echo "[INFO] Need sudo to install launcher to ${TARGET_BIN}"
@@ -77,13 +84,38 @@ bootstrap_install() {
   ${SUDO} bash "$INSTALL_DIR/install.sh"
 
   echo "[OK] 安装完成，正在启动 Nginx-X..."
-  exec nx
+  exec "$TARGET_BIN"
+}
+
+get_script_dir() {
+  # 兼容两种调用方式：
+  # 1) 本地文件执行: bash install.sh
+  # 2) 远程一键执行: bash -c "$(curl ... )"（此时 BASH_SOURCE 可能不可用）
+  local src=""
+
+  if [[ ${BASH_SOURCE[0]-} != "" ]]; then
+    src="${BASH_SOURCE[0]}"
+  else
+    src="$0"
+  fi
+
+  if [[ -n "$src" ]] && [[ -e "$src" ]]; then
+    cd "$(dirname "$src")" && pwd
+  else
+    pwd
+  fi
+}
+
+has_local_nx() {
+  local script_dir
+  script_dir="$(get_script_dir)"
+  [[ -f "${script_dir}/nx.sh" ]]
 }
 
 # 统一入口：
 # - 在仓库目录执行（存在 nx.sh）=> 本地安装
 # - 通过 curl 一键执行（通常无 nx.sh）=> 引导克隆后安装
-if [[ -f "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/nx.sh" ]]; then
+if has_local_nx; then
   install_local
 else
   bootstrap_install
