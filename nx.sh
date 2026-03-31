@@ -243,6 +243,16 @@ upgrade_nginx_smart() {
   fi
 }
 
+# ---------- 功能1：安装升级Nginx（合并入口） ----------
+install_or_upgrade_nginx() {
+  # 未安装时先安装；已安装时走智能升级逻辑
+  if ! check_cmd nginx; then
+    install_nginx_official
+  else
+    upgrade_nginx_smart
+  fi
+}
+
 # ---------- 反向代理配置通用 ----------
 valid_domain() {
   local d="$1"
@@ -1191,13 +1201,12 @@ banner() {
 }
 
 main_menu() {
-  echo "1) 安装Nginx"
-  echo "2) 升级Nginx"
-  echo "3) 添加配置"
-  echo "4) 配置列表"
-  echo "5) 证书管理"
-  echo "6) 实时信息"
-  echo "7) 卸载"
+  echo "1) 安装升级Nginx"
+  echo "2) 添加配置"
+  echo "3) 配置列表"
+  echo "4) 证书管理"
+  echo "5) 实时信息"
+  echo "6) 卸载"
   echo "0) 退出"
   echo "========================================"
 }
@@ -1211,13 +1220,12 @@ main() {
     read -rp "请选择功能: " choice
 
     case "$choice" in
-      1) install_nginx_official; pause ;;
-      2) upgrade_nginx_smart; pause ;;
-      3) add_reverse_proxy; pause ;;
-      4) config_manage_menu ;;
-      5) cert_menu ;;
-      6) show_nginx_realtime_status ;;
-      7) uninstall_menu ;;
+      1) install_or_upgrade_nginx; pause ;;
+      2) add_reverse_proxy; pause ;;
+      3) config_manage_menu ;;
+      4) cert_menu ;;
+      5) show_nginx_realtime_status ;;
+      6) uninstall_menu ;;
       0) info "已退出 ${APP_NAME}。"; exit 0 ;;
       *) warn "无效输入，请输入菜单编号。"; pause ;;
     esac
