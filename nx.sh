@@ -48,6 +48,13 @@ check_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+require_nginx_installed() {
+  if ! check_cmd nginx; then
+    error "未检测到 Nginx，请先执行 [1) 安装 Nginx]。"
+    return 1
+  fi
+}
+
 run_safe() {
   # 统一命令执行入口，便于后续扩展日志
   "$@"
@@ -55,6 +62,7 @@ run_safe() {
 
 nginx_test() {
   # 所有配置变更后必须调用 nginx -t
+  require_nginx_installed || return 1
   ${SUDO} nginx -t >/dev/null 2>&1
 }
 
@@ -318,6 +326,8 @@ apply_conf_with_rollback() {
 add_reverse_proxy() {
   local domain listen_port backend_port target tmp auto_https
 
+  require_nginx_installed || return 1
+
   read -rp "请输入域名（如 example.com）: " domain
   if ! valid_domain "$domain"; then
     error "域名格式不合法。"
@@ -545,6 +555,11 @@ delete_conf() {
 }
 
 config_manage_menu() {
+  require_nginx_installed || {
+    pause
+    return 1
+  }
+
   while true; do
     clear
     echo "========== 配置列表管理 =========="
@@ -797,6 +812,11 @@ EOF
 }
 
 cert_menu() {
+  require_nginx_installed || {
+    pause
+    return 1
+  }
+
   while true; do
     clear
     echo "========== 证书管理（acme.sh） =========="
@@ -844,6 +864,8 @@ EOF
 }
 
 show_nginx_realtime_status() {
+  require_nginx_installed || return 1
+
   ensure_status_endpoint || true
 
   local stat active rw waiting
