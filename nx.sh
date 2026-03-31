@@ -566,6 +566,47 @@ delete_conf() {
   fi
 }
 
+edit_conf_manual() {
+  local file target backup editor_cmd
+  file="${1:-}"
+  if [[ -z "$file" ]]; then
+    error "未指定配置文件。"
+    return 1
+  fi
+
+  target="${CONF_DIR}/${file}"
+  if [[ ! -f "$target" ]]; then
+    error "配置文件不存在：${target}"
+    return 1
+  fi
+
+  backup="${target}.editbak.$(date +%s)"
+  ${SUDO} cp -a "$target" "$backup"
+
+  # 优先使用环境变量 EDITOR，其次 nano，再次 vi
+  if [[ -n "${EDITOR:-}" ]]; then
+    editor_cmd="$EDITOR"
+  elif check_cmd nano; then
+    editor_cmd="nano"
+  else
+    editor_cmd="vi"
+  fi
+
+  ${SUDO} "$editor_cmd" "$target"
+
+  if nginx_test; then
+    reload_nginx_safe
+    ${SUDO} rm -f "$backup"
+    info "配置已编辑并生效：${file}"
+  else
+    ${SUDO} cp -a "$backup" "$target"
+    ${SUDO} rm -f "$backup"
+    error "编辑后配置校验失败，已回滚到修改前。"
+    ${SUDO} nginx -t || true
+    return 1
+  fi
+}
+
 config_file_action_menu() {
   local file="$1"
 
@@ -575,7 +616,8 @@ config_file_action_menu() {
     echo "1) 启用"
     echo "2) 停用"
     echo "3) 修改"
-    echo "4) 删除"
+    echo "4) 编辑"
+    echo "5) 删除"
     echo "0) 返回上一级"
     echo "============================"
     read -rp "请选择: " c
@@ -584,7 +626,8 @@ config_file_action_menu() {
       1) enable_conf "$file"; pause; return 0 ;;
       2) disable_conf "$file"; pause; return 0 ;;
       3) modify_conf "$file"; pause; return 0 ;;
-      4) delete_conf "$file"; pause; return 0 ;;
+      4) edit_conf_manual "$file"; pause; return 0 ;;
+      5) delete_conf "$file"; pause; return 0 ;;
       0) return 0 ;;
       *) warn "无效输入。"; pause ;;
     esac
