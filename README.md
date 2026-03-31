@@ -58,6 +58,8 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/ins
    - 设置邮箱（持久化到脚本目录 `.email.conf`）
    - 自动安装 acme.sh 并申请证书（HTTP 验证）
    - 证书列表与续期任务检查
+   - 启用证书时先从配置列表选择目标配置
+   - 自动检查是否已有证书：有证书直接启用；无证书先申请再启用
    - 一键启用 HTTPS（含 80→443 强制跳转）
 
 4. **实时信息**

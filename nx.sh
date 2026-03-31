@@ -1049,9 +1049,64 @@ cert_list_and_renew_check() {
 }
 
 enable_https_for_domain() {
-  local domain
-  read -rp "请输入要启用 HTTPS 的域名（对应 conf 文件名）: " domain
-  enable_https_for_domain_value "$domain"
+  enable_https_from_config_list
+}
+
+extract_domain_from_conf() {
+  local conf_file="$1"
+  local d
+  d="$(grep -E '^# domain=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# domain=//')"
+  if [[ -z "$d" ]]; then
+    # 回退：用文件名去掉 -端口.conf
+    d="$(basename "$conf_file" | sed -E 's/-[0-9]+\.conf$//; s/\.conf$//')"
+  fi
+  echo "$d"
+}
+
+enable_https_from_config_list() {
+  local -a confs
+  local idx conf_file domain
+
+  mapfile -t confs < <(ls -1 "${CONF_DIR}"/*.conf 2>/dev/null | sort || true)
+  if [[ ${#confs[@]} -eq 0 ]]; then
+    warn "未找到可启用 HTTPS 的配置文件。"
+    return 1
+  fi
+
+  echo "请选择要启用证书的配置："
+  for i in "${!confs[@]}"; do
+    domain="$(extract_domain_from_conf "${confs[$i]}")"
+    echo "  $((i+1))) $(basename "${confs[$i]}")  [域名: ${domain}]"
+  done
+  echo "  0) 返回上一级"
+  read -rp "选择序号: " idx
+
+  if [[ "$idx" == "0" ]]; then
+    return 0
+  fi
+  if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#confs[@]} )); then
+    error "无效序号。"
+    return 1
+  fi
+
+  conf_file="${confs[$((idx-1))]}"
+  domain="$(extract_domain_from_conf "$conf_file")"
+
+  if [[ ! -f "${SSL_DIR}/${domain}/fullchain.pem" || ! -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
+    warn "检测到域名 ${domain} 还没有可用证书，准备自动申请。"
+
+    if ! ensure_email_interactive; then
+      error "邮箱未设置，无法自动申请证书。"
+      return 1
+    fi
+
+    if ! issue_cert_for_domain "$domain"; then
+      error "自动申请证书失败，无法继续启用 HTTPS。"
+      return 1
+    fi
+  fi
+
+  enable_https_for_conf_file "$domain" "$conf_file"
 }
 
 enable_https_for_domain_value() {
