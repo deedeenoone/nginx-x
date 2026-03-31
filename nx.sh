@@ -308,6 +308,7 @@ apply_conf_with_rollback() {
   local tmp_conf="$1"
   local target_conf="$2"
   local backup="${target_conf}.rollback.$(date +%s)"
+  local test_output=""
 
   if [[ -f "$target_conf" ]]; then
     ${SUDO} cp -a "$target_conf" "$backup"
@@ -315,7 +316,7 @@ apply_conf_with_rollback() {
 
   ${SUDO} cp -a "$tmp_conf" "$target_conf"
 
-  if nginx_test; then
+  if test_output="$(${SUDO} nginx -t 2>&1)"; then
     reload_nginx_safe
     [[ -f "$backup" ]] && ${SUDO} rm -f "$backup"
     return 0
@@ -329,7 +330,7 @@ apply_conf_with_rollback() {
     ${SUDO} rm -f "$target_conf"
   fi
   error "配置测试失败，已自动撤销本次修改。"
-  ${SUDO} nginx -t || true
+  echo "$test_output"
   return 1
 }
 
@@ -361,6 +362,14 @@ add_reverse_proxy() {
     if ! confirm "是否继续写入配置并交由 nginx -t 校验？"; then
       info "已取消添加配置。"
       return 0
+    fi
+
+    # 443 端口复用时，若当前域名还没有证书，直接写入 listen 443 往往会与现有 ssl 配置冲突。
+    # 这里先引导落到 80，后续通过“自动申请证书+启用HTTPS”切到 443。
+    if [[ "$listen_port" == "443" ]] && [[ ! -f "${SSL_DIR}/${domain}/fullchain.pem" || ! -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
+      warn "检测到 443 端口复用且当前域名证书不存在，已自动改为先使用 80 端口创建配置。"
+      warn "后续可在同流程自动申请证书并启用 HTTPS。"
+      listen_port="80"
     fi
   fi
 
