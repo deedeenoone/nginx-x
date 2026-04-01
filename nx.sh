@@ -529,7 +529,7 @@ add_external_url_proxy() {
 
   echo "请选择外部反代模式："
   echo "1) 标准模式"
-  echo "2) Stream 模式（Emby/Jellyfin 优化）"
+  echo "2) Stream 模式"
   read -rp "选择模式 [1/2]: " mode
   case "$mode" in
     2) stream_mode="media" ;;
