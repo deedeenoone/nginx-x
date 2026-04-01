@@ -1506,9 +1506,19 @@ __SSL_SERVER_NAME_LINE__
 }
 EOF
 
-  # 复用原配置的 proxy_pass（支持本地端口和外部URL）
-  local existing_upstream host_header ssl_sni_line
-  existing_upstream="$(grep -Eo 'proxy_pass [^;]+' "$conf_file" | head -n1 | sed 's/^proxy_pass //')"
+  # 复用原配置上游：优先读取注释元数据，避免同端口多域名场景误取到错误上游
+  local existing_upstream host_header ssl_sni_line backend_port_meta upstream_url_meta
+  upstream_url_meta="$(grep -E '^# upstream_url=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# upstream_url=//')"
+  backend_port_meta="$(grep -E '^# backend_port=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# backend_port=//')"
+
+  if [[ -n "$upstream_url_meta" ]]; then
+    existing_upstream="$upstream_url_meta"
+  elif [[ -n "$backend_port_meta" ]]; then
+    existing_upstream="http://127.0.0.1:${backend_port_meta}"
+  else
+    existing_upstream="$(grep -Eo 'proxy_pass [^;]+' "$conf_file" | head -n1 | sed 's/^proxy_pass //')"
+  fi
+
   [[ -z "$existing_upstream" ]] && existing_upstream="http://127.0.0.1:3000"
 
   # 外部上游（尤其 https）需要 SNI 与上游 Host，避免 502/握手失败
