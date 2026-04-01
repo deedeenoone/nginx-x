@@ -1425,7 +1425,7 @@ extract_domain_from_conf() {
 
 conf_https_enabled() {
   local conf_file="$1"
-  grep -q '^# https_enabled=true' "$conf_file" 2>/dev/null
+  grep -q '^# https_enabled=true' "$conf_file" 2>/dev/null || grep -qE 'listen[[:space:]]+[0-9]+[[:space:]]+ssl' "$conf_file" 2>/dev/null
 }
 
 disable_https_for_conf_file() {
@@ -1545,10 +1545,14 @@ enable_https_from_config_list() {
   conf_file="${confs[$((idx-1))]}"
   domain="$(extract_domain_from_conf "$conf_file")"
 
+  note "已选择配置：$(basename "$conf_file")"
+
   if conf_https_enabled "$conf_file"; then
     warn "当前配置已启用 HTTPS：$(basename "$conf_file")"
     if confirm "是否停用 HTTPS？"; then
       disable_https_for_conf_file "$domain" "$conf_file"
+    else
+      info "已取消停用 HTTPS。"
     fi
     return 0
   fi
