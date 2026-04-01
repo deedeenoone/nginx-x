@@ -1550,10 +1550,19 @@ enable_https_from_config_list() {
   if conf_https_enabled "$conf_file"; then
     warn "当前配置已启用 HTTPS：$(basename "$conf_file")"
     if confirm "是否停用 HTTPS？"; then
-      disable_https_for_conf_file "$domain" "$conf_file"
+      if disable_https_for_conf_file "$domain" "$conf_file"; then
+        info "操作完成：HTTPS 已停用。"
+      else
+        error "操作失败：停用 HTTPS 未成功。"
+      fi
     else
       info "已取消停用 HTTPS。"
     fi
+    return 0
+  fi
+
+  if ! confirm "当前配置未启用 HTTPS，是否立即启用？"; then
+    info "已取消启用 HTTPS。"
     return 0
   fi
 
@@ -1571,7 +1580,12 @@ enable_https_from_config_list() {
     fi
   fi
 
-  enable_https_for_conf_file "$domain" "$conf_file"
+  if enable_https_for_conf_file "$domain" "$conf_file"; then
+    info "操作完成：HTTPS 已启用。"
+  else
+    error "操作失败：HTTPS 启用未成功。"
+    return 1
+  fi
 }
 
 enable_https_for_domain_value() {
@@ -1763,7 +1777,7 @@ cert_menu() {
       1) set_acme_email; pause ;;
       2) issue_cert; pause ;;
       3) cert_list_menu ;;
-      4) enable_https_for_domain || true ;;
+      4) enable_https_for_domain || true; pause ;;
       0) return 0 ;;
       *) warn "无效输入。"; pause ;;
     esac
