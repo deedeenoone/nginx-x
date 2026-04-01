@@ -1129,10 +1129,19 @@ ensure_acme_location_for_domain_conf() {
 ensure_http_challenge_server() {
   # 为“非80端口业务配置”补一个临时 80 验证入口，保证 HTTP-01 可达
   local domain="$1"
-  local challenge_conf="${CONF_DIR}/.acme-challenge-${domain}.conf"
+  local challenge_conf="${CONF_DIR}/acme-challenge-${domain}.conf"
 
-  if grep -R -E "server_name[[:space:]]+${domain}[[:space:]]*;" "${CONF_DIR}"/*.conf 2>/dev/null | grep -q "listen 80"; then
-    # 已存在80监听同域名配置，无需额外创建
+  # 检测是否已存在“同域名 + 80监听”的配置
+  if awk -v d="$domain" '
+    BEGIN{in_server=0; has80=0; hasDomain=0}
+    /server\s*\{/ {in_server=1; has80=0; hasDomain=0}
+    in_server && /listen[[:space:]]+80([[:space:]]|;)/ {has80=1}
+    in_server && $0 ~ "server_name[[:space:]]+" d "([[:space:]]|;)" {hasDomain=1}
+    in_server && /}/ {
+      if (has80 && hasDomain) {print "yes"; exit 0}
+      in_server=0
+    }
+  ' "${CONF_DIR}"/*.conf 2>/dev/null | grep -q yes; then
     echo ""
     return 0
   fi
