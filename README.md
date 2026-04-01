@@ -65,6 +65,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/ins
    - 证书列表：按编号展示已有证书，并显示续期任务状态
    - 证书操作：支持按编号执行 重新申请 / 启停续期 / 删除证书
    - 启用证书时先从配置列表选择目标配置
+   - 若配置已启用 HTTPS，再次选择该配置可按确认执行“停用 HTTPS”
    - 自动检查是否已有证书：有证书直接启用；无证书先申请再启用
    - 一键启用 HTTPS（自动继承原监听端口；80 自动跳转到对应 HTTPS 端口）
 

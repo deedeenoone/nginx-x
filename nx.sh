@@ -1423,6 +1423,99 @@ extract_domain_from_conf() {
   echo "$d"
 }
 
+conf_https_enabled() {
+  local conf_file="$1"
+  grep -q '^# https_enabled=true' "$conf_file" 2>/dev/null
+}
+
+disable_https_for_conf_file() {
+  local domain="$1"
+  local conf_file="$2"
+  local listen_port existing_upstream host_header ssl_sni_line stream_mode stream_block tmp
+
+  listen_port="$(grep -E '^# listen_port=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# listen_port=//')"
+  [[ -z "$listen_port" ]] && listen_port="80"
+
+  stream_mode="$(grep -E '^# stream_mode=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# stream_mode=//')"
+  stream_block=""
+  if [[ "$stream_mode" == "media" ]]; then
+    stream_block=$(cat <<'BLOCK'
+        # Stream 转发优化（Emby/Jellyfin 等）
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_max_temp_file_size 0;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        send_timeout 3600s;
+        client_max_body_size 0;
+BLOCK
+)
+  fi
+
+  existing_upstream="$(grep -Eo 'proxy_pass [^;]+' "$conf_file" | head -n1 | sed 's/^proxy_pass //')"
+  [[ -z "$existing_upstream" ]] && existing_upstream="http://127.0.0.1:3000"
+
+  if [[ "$existing_upstream" =~ ^https?://127\.0\.0\.1(:[0-9]+)?(/|$) ]]; then
+    host_header='\$host'
+    ssl_sni_line=''
+  else
+    host_header='\$proxy_host'
+    if [[ "$existing_upstream" =~ ^https:// ]]; then
+      ssl_sni_line='        proxy_ssl_server_name on;'
+    else
+      ssl_sni_line=''
+    fi
+  fi
+
+  tmp="/tmp/nginxx-disable-https-${domain}.conf"
+  cat > "$tmp" <<EOF
+# managed_by=Nginx-X
+# domain=${domain}
+# listen_port=${listen_port}
+# stream_mode=${stream_mode:-normal}
+
+server {
+    listen ${listen_port};
+    server_name ${domain};
+
+    # ACME HTTP-01 验证路径（证书申请/续期）
+    location ^~ /.well-known/acme-challenge/ {
+        root /usr/share/nginx/html;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+
+    location / {
+        proxy_pass ${existing_upstream};
+        proxy_http_version 1.1;
+
+${stream_block}
+
+${ssl_sni_line}
+
+        proxy_set_header Host ${host_header};
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
+
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+
+  if apply_conf_with_rollback "$tmp" "$conf_file"; then
+    info "HTTPS 已停用：$(basename "$conf_file")"
+    rm -f "$tmp"
+    return 0
+  fi
+
+  rm -f "$tmp"
+  return 1
+}
+
 enable_https_from_config_list() {
   local -a confs
   local idx conf_file domain
@@ -1451,6 +1544,14 @@ enable_https_from_config_list() {
 
   conf_file="${confs[$((idx-1))]}"
   domain="$(extract_domain_from_conf "$conf_file")"
+
+  if conf_https_enabled "$conf_file"; then
+    warn "当前配置已启用 HTTPS：$(basename "$conf_file")"
+    if confirm "是否停用 HTTPS？"; then
+      disable_https_for_conf_file "$domain" "$conf_file"
+    fi
+    return 0
+  fi
 
   if [[ ! -f "${SSL_DIR}/${domain}/fullchain.pem" || ! -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
     warn "检测到域名 ${domain} 还没有可用证书，准备自动申请。"
@@ -1658,7 +1759,7 @@ cert_menu() {
       1) set_acme_email; pause ;;
       2) issue_cert; pause ;;
       3) cert_list_menu ;;
-      4) enable_https_for_domain ;;
+      4) enable_https_for_domain || true ;;
       0) return 0 ;;
       *) warn "无效输入。"; pause ;;
     esac
