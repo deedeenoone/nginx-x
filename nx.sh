@@ -330,11 +330,28 @@ build_external_proxy_conf() {
   local domain="$1"
   local listen_port="$2"
   local upstream_url="$3"
-  local out="$4"
+  local stream_mode="$4"
+  local out="$5"
+  local stream_block=""
+
+  if [[ "$stream_mode" == "media" ]]; then
+    stream_block=$(cat <<'BLOCK'
+        # Stream 转发优化（Emby/Jellyfin 等）
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_max_temp_file_size 0;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        send_timeout 3600s;
+        client_max_body_size 0;
+BLOCK
+)
+  fi
 
   cat > "$out" <<EOF
 # managed_by=Nginx-X
 # mode=external
+# stream_mode=${stream_mode}
 # domain=${domain}
 # listen_port=${listen_port}
 # upstream_url=${upstream_url}
@@ -354,6 +371,8 @@ server {
         proxy_pass ${upstream_url};
         proxy_http_version 1.1;
 
+${stream_block}
+
         # 外部上游建议保留 SNI
         proxy_ssl_server_name on;
 
@@ -369,6 +388,7 @@ server {
     }
 }
 EOF
+
 }
 
 apply_conf_with_rollback() {
@@ -485,7 +505,7 @@ add_reverse_proxy() {
 }
 
 add_external_url_proxy() {
-  local domain listen_port upstream_url target tmp
+  local domain listen_port upstream_url target tmp mode stream_mode
 
   require_nginx_installed || return 1
 
@@ -507,6 +527,15 @@ add_external_url_proxy() {
     return 1
   fi
 
+  echo "请选择外部反代模式："
+  echo "1) 标准模式"
+  echo "2) Stream 模式（Emby/Jellyfin 优化）"
+  read -rp "选择模式 [1/2]: " mode
+  case "$mode" in
+    2) stream_mode="media" ;;
+    *) stream_mode="normal" ;;
+  esac
+
   if is_port_used_os "$listen_port"; then
     warn "监听端口 ${listen_port} 当前已被占用（Nginx 多站点场景通常可复用）。"
     if ! confirm "是否继续写入配置并交由 nginx -t 校验？"; then
@@ -524,7 +553,7 @@ add_external_url_proxy() {
   target="$(conf_target_path "$domain" "$listen_port")"
   tmp="/tmp/nginxx-external-${domain}.conf"
 
-  build_external_proxy_conf "$domain" "$listen_port" "$upstream_url" "$tmp"
+  build_external_proxy_conf "$domain" "$listen_port" "$upstream_url" "$stream_mode" "$tmp"
   if apply_conf_with_rollback "$tmp" "$target"; then
     info "外部反代配置已生效：${target}"
 
@@ -1297,7 +1326,7 @@ enable_https_for_domain_value() {
 enable_https_for_conf_file() {
   local domain="$1"
   local conf_file="$2"
-  local ssl_conf tmp listen_port redirect_suffix
+  local ssl_conf tmp listen_port redirect_suffix stream_mode stream_block
 
   if [[ ! -f "$conf_file" ]]; then
     error "配置文件不存在：${conf_file}"
@@ -1318,6 +1347,22 @@ enable_https_for_conf_file() {
     redirect_suffix=":${listen_port}"
   fi
 
+  stream_mode="$(grep -E '^# stream_mode=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# stream_mode=//')"
+  stream_block=""
+  if [[ "$stream_mode" == "media" ]]; then
+    stream_block=$(cat <<'BLOCK'
+        # Stream 转发优化（Emby/Jellyfin 等）
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_max_temp_file_size 0;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        send_timeout 3600s;
+        client_max_body_size 0;
+BLOCK
+)
+  fi
+
   tmp="/tmp/nginxx-https-${domain}.conf"
 
   # 生成 HTTPS 配置：继承原监听端口（支持非标端口，如 7777）
@@ -1326,6 +1371,7 @@ enable_https_for_conf_file() {
 # domain=${domain}
 # https_enabled=true
 # listen_port=${listen_port}
+# stream_mode=${stream_mode:-normal}
 
 server {
     listen 80;
@@ -1354,6 +1400,8 @@ server {
     location / {
         proxy_pass __UPSTREAM_PLACEHOLDER__;
         proxy_http_version 1.1;
+
+${stream_block}
 
 __SSL_SERVER_NAME_LINE__
 
