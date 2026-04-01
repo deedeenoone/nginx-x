@@ -2057,8 +2057,8 @@ EOF
         domain="$(extract_domain_from_conf "$conf")"
 
         if [[ -f "$log_file" && -n "$domain" ]]; then
-          req_count="$(tail -n 5000 "$log_file" 2>/dev/null | grep -F "$domain" | wc -l | awk '{print $1}')"
-          bytes_sum="$(tail -n 5000 "$log_file" 2>/dev/null | grep -F "$domain" | awk '{if($10 ~ /^[0-9]+$/) s+=$10} END{print s+0}')"
+          req_count="$( (tail -n 5000 "$log_file" 2>/dev/null | grep -F "$domain" | wc -l | awk '{print $1}') || true )"
+          bytes_sum="$( (tail -n 5000 "$log_file" 2>/dev/null | grep -F "$domain" | awk '{if($10 ~ /^[0-9]+$/) s+=$10} END{print s+0}') || true )"
         else
           req_count="0"
           bytes_sum="0"
