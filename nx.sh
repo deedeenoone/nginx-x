@@ -535,7 +535,7 @@ add_reverse_proxy() {
 
     if [[ -f "${SSL_DIR}/${domain}/fullchain.pem" && -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
       if confirm "检测到已有证书，是否立即启用证书（HTTPS 强制跳转）？"; then
-        if enable_https_for_conf_file "$domain" "$target"; then
+        if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
           info "已完成：反向代理 + HTTPS 启用。"
         else
           warn "启用 HTTPS 失败，请检查配置后重试。"
@@ -548,7 +548,7 @@ add_reverse_proxy() {
           warn "邮箱未设置成功，已跳过自动证书流程。你可稍后在证书管理里设置。"
         else
           if issue_cert_for_domain "$domain"; then
-            if enable_https_for_conf_file "$domain" "$target"; then
+            if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
               info "已完成：反向代理 + 自动证书 + 自动 HTTPS。"
             else
               warn "证书已申请成功，但启用 HTTPS 失败，请检查配置后重试。"
@@ -651,7 +651,7 @@ add_external_url_proxy() {
 
     if [[ -f "${SSL_DIR}/${domain}/fullchain.pem" && -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
       if confirm "检测到已有证书，是否立即启用证书（HTTPS 强制跳转）？"; then
-        if enable_https_for_conf_file "$domain" "$target"; then
+        if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
           info "已完成：外部反代 + HTTPS 启用。"
         else
           warn "启用 HTTPS 失败，请检查配置后重试。"
@@ -663,7 +663,7 @@ add_external_url_proxy() {
           warn "邮箱未设置成功，已跳过自动证书流程。你可稍后在证书管理里设置。"
         else
           if issue_cert_for_domain "$domain"; then
-            if enable_https_for_conf_file "$domain" "$target"; then
+            if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
               info "已完成：外部反代 + 自动证书 + 自动 HTTPS。"
             else
               warn "证书已申请成功，但启用 HTTPS 失败，请检查配置后重试。"
@@ -1540,9 +1540,12 @@ EOF
 
   if apply_conf_with_rollback "$tmp" "$conf_file"; then
     info "HTTPS 已启用，且已配置 80 -> ${listen_port} 强制跳转。"
+    rm -f "$tmp"
+    return 0
   fi
 
   rm -f "$tmp"
+  return 1
 }
 
 cert_menu() {
