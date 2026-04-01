@@ -41,6 +41,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/ins
    - 自动检查是否已安装 Nginx
    - 未安装时自动安装依赖：`curl` `wget` `socat` `cron`
    - 自动安装 Nginx 官方 stable 版本
+   - 安装后自动停用 `default.conf`（改名为 `default.conf.bak`）避免与自定义配置冲突
    - 自动创建证书目录：`/etc/nginx/ssl/`
    - 对比本地版本与 Nginx 官网最新版本
    - 有新版本时先备份 `/etc/nginx/`，再执行升级

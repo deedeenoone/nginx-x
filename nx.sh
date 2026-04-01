@@ -98,6 +98,16 @@ ensure_dirs() {
   ${SUDO} mkdir -p "$SSL_DIR"
 }
 
+disable_default_conf_if_exists() {
+  local default_conf="${CONF_DIR}/default.conf"
+  local disabled_conf="${CONF_DIR}/default.conf.bak"
+
+  if [[ -f "$default_conf" ]]; then
+    ${SUDO} mv "$default_conf" "$disabled_conf"
+    info "已自动停用默认配置：${default_conf} -> ${disabled_conf}"
+  fi
+}
+
 detect_os_id() {
   if [[ -f /etc/os-release ]]; then
     . /etc/os-release
@@ -196,6 +206,10 @@ REPO
     ${SUDO} systemctl enable --now nginx || true
     ${SUDO} systemctl enable --now cron 2>/dev/null || ${SUDO} systemctl enable --now crond 2>/dev/null || true
   fi
+
+  # 安装后自动停用可能引发冲突的默认配置
+  disable_default_conf_if_exists
+  reload_nginx_safe || true
 
   info "Nginx 与依赖安装完成。"
   info "已创建证书目录：${SSL_DIR}"
