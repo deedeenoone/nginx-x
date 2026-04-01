@@ -1913,6 +1913,98 @@ EOF
   done
 }
 
+show_traffic_stats() {
+  require_nginx_installed || return 1
+
+  local log_file="/var/log/nginx/access.log"
+  local prev_rx=0 prev_tx=0 initialized=0
+
+  while true; do
+    local rx tx rx_rate tx_rate rx_total_mb tx_total_mb
+    rx="$(awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$3} END{print s+0}' /proc/net/dev 2>/dev/null)"
+    tx="$(awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$11} END{print s+0}' /proc/net/dev 2>/dev/null)"
+
+    if [[ $initialized -eq 1 ]]; then
+      rx_rate="$(awk -v d=$((rx-prev_rx)) 'BEGIN{if(d<0)d=0; printf "%.2f", d/1024/1024}')"
+      tx_rate="$(awk -v d=$((tx-prev_tx)) 'BEGIN{if(d<0)d=0; printf "%.2f", d/1024/1024}')"
+    else
+      rx_rate="0.00"
+      tx_rate="0.00"
+      initialized=1
+    fi
+
+    prev_rx="$rx"
+    prev_tx="$tx"
+    rx_total_mb="$(awk -v b="$rx" 'BEGIN{printf "%.2f", b/1024/1024}')"
+    tx_total_mb="$(awk -v b="$tx" 'BEGIN{printf "%.2f", b/1024/1024}')"
+
+    clear
+    cat <<EOF
+==============================
+ 流量统计
+==============================
+
+总流量（系统网卡）
+RX总量: ${rx_total_mb} MB
+TX总量: ${tx_total_mb} MB
+RX速率: ${rx_rate} MB/s
+TX速率: ${tx_rate} MB/s
+
+当前启用配置流量（最近5000日志，按域名估算）
+EOF
+
+    mapfile -t enabled_confs < <(ls -1 "${CONF_DIR}"/*.conf 2>/dev/null | sort || true)
+    if [[ ${#enabled_confs[@]} -eq 0 ]]; then
+      echo "- 无启用配置"
+    else
+      for conf in "${enabled_confs[@]}"; do
+        local domain req_count bytes_sum bytes_mb
+        domain="$(extract_domain_from_conf "$conf")"
+
+        if [[ -f "$log_file" && -n "$domain" ]]; then
+          req_count="$(tail -n 5000 "$log_file" 2>/dev/null | grep -F "$domain" | wc -l | awk '{print $1}')"
+          bytes_sum="$(tail -n 5000 "$log_file" 2>/dev/null | grep -F "$domain" | awk '{if($10 ~ /^[0-9]+$/) s+=$10} END{print s+0}')"
+        else
+          req_count="0"
+          bytes_sum="0"
+        fi
+
+        bytes_mb="$(awk -v b="$bytes_sum" 'BEGIN{printf "%.2f", b/1024/1024}')"
+        echo "- $(basename "$conf") | 域名: ${domain} | 请求: ${req_count} | 下行: ${bytes_mb} MB"
+      done
+    fi
+
+    cat <<EOF
+
+==============================
+按回车返回（每5秒自动刷新）
+EOF
+
+    if read -r -s -n 1 -t 5 _key; then
+      break
+    fi
+  done
+}
+
+realtime_info_menu() {
+  while true; do
+    clear
+    echo "========== 实时信息 =========="
+    echo "1) 实时信息"
+    echo "2) 流量统计"
+    echo "0) 返回上一级"
+    echo "============================="
+    read -rp "请选择: " c
+
+    case "$c" in
+      1) show_nginx_realtime_status ;;
+      2) show_traffic_stats ;;
+      0) return 0 ;;
+      *) warn "无效输入。"; pause ;;
+    esac
+  done
+}
+
 # ---------- 功能7：卸载 ----------
 uninstall_script_only() {
   note "将执行：卸载 nx 快捷命令、删除脚本目录下运行文件。"
@@ -2065,7 +2157,7 @@ main() {
       1) install_or_upgrade_nginx; pause ;;
       2) config_entry_menu ;;
       3) cert_menu ;;
-      4) show_nginx_realtime_status ;;
+      4) realtime_info_menu ;;
       5) uninstall_menu ;;
       0) info "已退出 ${APP_NAME}。"; exit 0 ;;
       *) warn "无效输入，请输入菜单编号。"; pause ;;
@@ -2074,5 +2166,3 @@ main() {
 }
 
 main
-  desired_port="$listen_port"
-  create_port="$listen_port"
