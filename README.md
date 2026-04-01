@@ -51,6 +51,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/ins
    - 添加配置：输入域名或本机IPv4、监听端口、后端端口，支持端口复用确认
    - 外部反代：输入域名或本机IPv4、监听端口、外部 `http/https` 上游 URL
    - 外部反代支持模式选择：`标准模式` / `Stream 模式（Emby/Jellyfin 优化）`
+   - 同端口多域名场景自动适配：若目标端口已用于 HTTPS，会自动处理为可通过 `nginx -t` 的流程
    - 自动生成标准 Proxy Header，配置写入 `/etc/nginx/conf.d/域名-监听端口.conf`
    - 添加完成后自动检测证书：
      - 若已有证书：仅需确认是否启用 HTTPS

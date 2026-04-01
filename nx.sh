@@ -304,6 +304,11 @@ is_port_used_os() {
   ss -lnt "( sport = :${p} )" 2>/dev/null | awk 'NR>1{print}' | grep -q .
 }
 
+port_has_ssl_listener() {
+  local p="$1"
+  grep -R -E "listen[[:space:]]+${p}([[:space:]]|;).*ssl" "${CONF_DIR}"/*.conf >/dev/null 2>&1
+}
+
 conf_target_path() {
   local domain="$1"
   local listen_port="$2"
@@ -449,6 +454,7 @@ apply_conf_with_rollback() {
 
 add_reverse_proxy() {
   local domain listen_port backend_port target tmp auto_https
+  local desired_port create_port force_enable_https="0"
 
   require_nginx_installed || return 1
 
@@ -470,6 +476,9 @@ add_reverse_proxy() {
     return 1
   fi
 
+  desired_port="$listen_port"
+  create_port="$listen_port"
+
   if is_port_used_os "$listen_port"; then
     warn "监听端口 ${listen_port} 当前已被占用（Nginx 多站点场景通常可复用）。"
     if ! confirm "是否继续写入配置并交由 nginx -t 校验？"; then
@@ -482,16 +491,40 @@ add_reverse_proxy() {
     if [[ "$listen_port" == "443" ]] && [[ ! -f "${SSL_DIR}/${domain}/fullchain.pem" || ! -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
       warn "检测到 443 端口复用且当前域名证书不存在，已自动改为先使用 80 端口创建配置。"
       warn "后续可在同流程自动申请证书并启用 HTTPS。"
-      listen_port="80"
+      create_port="80"
+    fi
+
+    # 非 443 的复用端口，如果当前端口已用于 HTTPS 监听，也要避免直接写入纯 HTTP 配置
+    if port_has_ssl_listener "$desired_port"; then
+      if [[ -f "${SSL_DIR}/${domain}/fullchain.pem" && -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
+        warn "检测到端口 ${desired_port} 已用于 HTTPS，且当前域名已有证书。"
+        warn "将先写入临时 HTTP 配置，再自动切换为 ${desired_port} HTTPS。"
+        create_port="80"
+        force_enable_https="1"
+      else
+        warn "检测到端口 ${desired_port} 已用于 HTTPS，但当前域名暂无证书。"
+        warn "已自动改为先使用 80 端口创建配置，后续申请证书后再切换 HTTPS。"
+        create_port="80"
+      fi
     fi
   fi
 
-  target="$(conf_target_path "$domain" "$listen_port")"
+  target="$(conf_target_path "$domain" "$desired_port")"
   tmp="/tmp/nginxx-${domain}.conf"
 
-  build_proxy_conf "$domain" "$listen_port" "$backend_port" "$tmp"
+  build_proxy_conf "$domain" "$create_port" "$backend_port" "$tmp"
   if apply_conf_with_rollback "$tmp" "$target"; then
     info "反向代理配置已生效：${target}"
+
+    if [[ "$force_enable_https" == "1" ]]; then
+      if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
+        info "已完成：同端口 HTTPS 复用配置已自动启用。"
+      else
+        warn "自动切换 HTTPS 失败，请检查证书和配置。"
+      fi
+      rm -f "$tmp"
+      return 0
+    fi
 
     if valid_ipv4_host "$domain"; then
       warn "当前使用的是 IP，证书自动申请通常不适用，已跳过证书流程。"
@@ -531,6 +564,7 @@ add_reverse_proxy() {
 
 add_external_url_proxy() {
   local domain listen_port upstream_url target tmp mode stream_mode
+  local desired_port create_port force_enable_https="0"
 
   require_nginx_installed || return 1
 
@@ -571,16 +605,39 @@ add_external_url_proxy() {
     if [[ "$listen_port" == "443" ]] && [[ ! -f "${SSL_DIR}/${domain}/fullchain.pem" || ! -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
       warn "检测到 443 端口复用且当前域名证书不存在，已自动改为先使用 80 端口创建配置。"
       warn "后续可在同流程自动申请证书并启用 HTTPS。"
-      listen_port="80"
+      create_port="80"
+    fi
+
+    if port_has_ssl_listener "$desired_port"; then
+      if [[ -f "${SSL_DIR}/${domain}/fullchain.pem" && -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
+        warn "检测到端口 ${desired_port} 已用于 HTTPS，且当前域名已有证书。"
+        warn "将先写入临时 HTTP 配置，再自动切换为 ${desired_port} HTTPS。"
+        create_port="80"
+        force_enable_https="1"
+      else
+        warn "检测到端口 ${desired_port} 已用于 HTTPS，但当前域名暂无证书。"
+        warn "已自动改为先使用 80 端口创建配置，后续申请证书后再切换 HTTPS。"
+        create_port="80"
+      fi
     fi
   fi
 
-  target="$(conf_target_path "$domain" "$listen_port")"
+  target="$(conf_target_path "$domain" "$desired_port")"
   tmp="/tmp/nginxx-external-${domain}.conf"
 
-  build_external_proxy_conf "$domain" "$listen_port" "$upstream_url" "$stream_mode" "$tmp"
+  build_external_proxy_conf "$domain" "$create_port" "$upstream_url" "$stream_mode" "$tmp"
   if apply_conf_with_rollback "$tmp" "$target"; then
     info "外部反代配置已生效：${target}"
+
+    if [[ "$force_enable_https" == "1" ]]; then
+      if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
+        info "已完成：同端口 HTTPS 复用配置已自动启用。"
+      else
+        warn "自动切换 HTTPS 失败，请检查证书和配置。"
+      fi
+      rm -f "$tmp"
+      return 0
+    fi
 
     if valid_ipv4_host "$domain"; then
       warn "当前使用的是 IP，证书自动申请通常不适用，已跳过证书流程。"
@@ -1351,6 +1408,7 @@ enable_https_for_domain_value() {
 enable_https_for_conf_file() {
   local domain="$1"
   local conf_file="$2"
+  local force_port="${3:-}"
   local ssl_conf tmp listen_port redirect_suffix stream_mode stream_block
 
   if [[ ! -f "$conf_file" ]]; then
@@ -1365,6 +1423,7 @@ enable_https_for_conf_file() {
 
   # 优先读取配置注释中的监听端口，缺失时回退 443
   listen_port="$(grep -E '^# listen_port=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# listen_port=//')"
+  [[ -n "$force_port" ]] && listen_port="$force_port"
   [[ -z "$listen_port" ]] && listen_port="443"
   if [[ "$listen_port" == "443" ]]; then
     redirect_suffix=""
@@ -1790,3 +1849,5 @@ main() {
 }
 
 main
+  desired_port="$listen_port"
+  create_port="$listen_port"
