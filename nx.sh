@@ -1775,7 +1775,7 @@ cert_menu() {
 
     case "$c" in
       1) set_acme_email; pause ;;
-      2) issue_cert; pause ;;
+      2) issue_cert || true; pause ;;
       3) cert_list_menu ;;
       4) enable_https_for_domain || true; pause ;;
       0) return 0 ;;
