@@ -62,7 +62,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/ins
    - 外部反代：输入域名或本机IPv4、监听端口、外部 `http/https` 上游 URL
    - 外部反代支持模式选择：
      - `标准模式`
-     - `Stream 模式（Emby/Jellyfin 优化）`
+     - `Stream 模式`
      - `Emby 分离 HTTP 推流`
      - `Emby 分离 HTTPS 推流`
      - `LilyEmby 方案三（支持 sub_filter 响应体替换）`
