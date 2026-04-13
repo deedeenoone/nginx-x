@@ -9,7 +9,15 @@
 - 校验通过才会 `reload`
 - 校验失败会自动回滚，避免把服务改挂
 
-## 快速开始
+## 安装方式
+
+### 方式一：一键安装（推荐）
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/install.sh)"
+```
+
+### 方式二：手动安装
 
 ```bash
 git clone https://github.com/Xiuyixx/Nginx-X.git
@@ -17,24 +25,11 @@ cd Nginx-X
 bash install.sh
 ```
 
-安装后可直接运行：
-
-```bash
-nx
-```
-
-## 一键安装（推荐）
-
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/install.sh)"
-```
-
-说明：
-- 首次执行会克隆到 `/opt/Nginx-X`
+安装说明：
+- 一键安装首次会克隆到 `/opt/Nginx-X`
 - 再次执行会自动拉取最新代码
 - 如果 `/opt/Nginx-X` 已存在但不是 Git 仓库，安装器会先提示确认，再决定是否清空重装
-- 安装完成后自动启动 `nx`
+- 安装完成后可直接运行 `nx`
 
 ## 当前功能
 
