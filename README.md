@@ -37,6 +37,14 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/ins
 
 ## 当前功能
 
+### 稳定性设计
+
+- 所有配置变更都会先执行 `nginx -t`
+- 校验失败自动回滚，避免把在线 Nginx 配挂
+- 443 / HTTPS 端口复用场景会优先走更安全的落地流程
+- 证书申请前会做 HTTP-01 自检，并区分“软失败可继续”和“硬失败建议先修复”
+- 临时文件使用安全随机文件名，降低冲突和误覆盖风险
+
 1. **安装升级Nginx**
    - 自动检查是否已安装 Nginx
    - 未安装时自动安装依赖：`curl` `wget` `socat` `cron`
@@ -62,7 +70,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/ins
 3. **证书管理**
    - 设置邮箱（持久化到脚本目录 `.email.conf`）
    - 自动安装 acme.sh 并申请证书（HTTP 验证）
-   - 申请前自动执行 HTTP-01 自检（DNS/80监听/challenge 路径/域名回源）
+   - 申请前自动执行 HTTP-01 自检（DNS/80监听/challenge 路径/域名回源），失败时给出更明确提示
    - 证书列表：按编号展示已有证书，并显示续期任务状态
    - 证书操作：支持按编号执行 重新申请 / 启停续期 / 删除证书
    - 启用证书时先从配置列表选择目标配置
@@ -73,7 +81,9 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/ins
 4. **实时信息**
    - 二级菜单包含：`实时信息` / `流量统计`
    - 实时信息：展示连接状态、请求统计、QPS、系统资源、Nginx 信息、网络流量
-   - 流量统计：展示系统总流量与当前启用配置的流量估算（基于最近 5000 条日志）
+   - 流量统计：展示系统总流量与当前启用配置的流量估算
+   - 若存在 `/var/log/nginx/access.host.log`，会优先按 Host 专用日志做更精确统计
+   - 若不存在 Host 专用日志，则回退为基于最近 5000 条 `access.log` 的估算
    - 每 5 秒自动刷新，按回车返回上一级
 
 5. **卸载**
@@ -81,6 +91,41 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Xiuyixx/Nginx-X/main/ins
    - 选项2：卸载 Nginx（彻底卸载并清空 Nginx 及配置）
    - 选项3：卸载 Acme（彻底卸载并清空 Acme 配置/邮箱信息）
    - 选项4：全部卸载（脚本 + Nginx + Acme 一并清理）
+
+## 已知限制
+
+- 证书签发当前只覆盖 `HTTP-01` 场景，不支持 DNS API 自动签发通配符证书。
+- 若服务器前面有 CDN、四层转发、NAT 回环限制，HTTP-01 自检可能出现“软失败但实际可签发”或“本机通过但公网不通”的差异，需要结合实际网络环境判断。
+- 流量统计默认是轻量实现。若未配置 `/var/log/nginx/access.host.log`，统计结果属于估算值，不适合作为精准计费依据。
+- 当前没有完整的端到端自动化测试，仓库内提供的是基础语法检查与 ShellCheck CI。
+
+## 建议的 Host 专用日志格式
+
+如果你希望“流量统计”更准确，可在 Nginx 主配置里增加类似：
+
+```nginx
+log_format nginxx_host '$host $body_bytes_sent $remote_addr [$time_local] '
+                      '"$request" $status $http_referer "$http_user_agent"';
+access_log /var/log/nginx/access.host.log nginxx_host;
+```
+
+这样脚本会优先读取 `access.host.log`，按域名做更准确的请求数和下行统计。
+
+## 开发校验
+
+本仓库已包含 GitHub Actions 基础 CI：
+
+- `bash -n nx.sh`
+- `bash -n install.sh`
+- `shellcheck -x nx.sh install.sh`
+
+本地也可以直接运行：
+
+```bash
+bash -n nx.sh
+bash -n install.sh
+shellcheck -x nx.sh install.sh
+```
 
 ## 交互规范
 

@@ -37,6 +37,11 @@ pause() {
   read -rp "按回车继续..." _
 }
 
+cleanup_tmp_file() {
+  local f="${1:-}"
+  [[ -n "$f" && -f "$f" ]] && rm -f "$f"
+}
+
 confirm() {
   local prompt="$1"
   read -rp "${prompt} [y/N]: " ans
@@ -58,6 +63,26 @@ require_nginx_installed() {
 run_safe() {
   # 统一命令执行入口，便于后续扩展日志
   "$@"
+}
+
+run_editor() {
+  local target="$1"
+  local editor_cmd
+
+  if [[ -n "${EDITOR:-}" ]]; then
+    editor_cmd="$EDITOR"
+  elif check_cmd nano; then
+    editor_cmd="nano"
+  else
+    editor_cmd="vi"
+  fi
+
+  # shellcheck disable=SC2016
+  if [[ -n "$SUDO" ]]; then
+    ${SUDO} env EDITOR_CMD="$editor_cmd" bash -lc 'eval "\$EDITOR_CMD \"\$1\""' _ "$target"
+  else
+    env EDITOR_CMD="$editor_cmd" bash -lc 'eval "\$EDITOR_CMD \"\$1\""' _ "$target"
+  fi
 }
 
 nginx_test() {
@@ -450,8 +475,10 @@ apply_conf_with_rollback() {
   # 参数：临时文件、目标文件
   local tmp_conf="$1"
   local target_conf="$2"
-  local backup="${target_conf}.rollback.$(date +%s)"
+  local backup
   local test_output=""
+
+  backup="${target_conf}.rollback.$(date +%s)"
 
   if [[ -f "$target_conf" ]]; then
     ${SUDO} cp -a "$target_conf" "$backup"
@@ -478,7 +505,7 @@ apply_conf_with_rollback() {
 }
 
 add_reverse_proxy() {
-  local domain listen_port backend_port target tmp auto_https
+  local domain listen_port backend_port target tmp
   local desired_port create_port force_enable_https="0"
 
   require_nginx_installed || return 1
@@ -535,7 +562,7 @@ add_reverse_proxy() {
   fi
 
   target="$(conf_target_path "$domain" "$desired_port")"
-  tmp="$(mktemp /tmp/nginxx-${domain}.XXXXXX.conf)"
+  tmp="$(mktemp /tmp/nginxx-"${domain}".XXXXXX.conf)"
 
   build_proxy_conf "$domain" "$create_port" "$backend_port" "$tmp"
   if apply_conf_with_rollback "$tmp" "$target"; then
@@ -651,7 +678,7 @@ add_external_url_proxy() {
   fi
 
   target="$(conf_target_path "$domain" "$desired_port")"
-  tmp="$(mktemp /tmp/nginxx-external-${domain}.XXXXXX.conf)"
+  tmp="$(mktemp /tmp/nginxx-external-"${domain}".XXXXXX.conf)"
 
   build_external_proxy_conf "$domain" "$create_port" "$upstream_url" "$stream_mode" "$tmp"
   if apply_conf_with_rollback "$tmp" "$target"; then
@@ -705,7 +732,7 @@ add_external_url_proxy() {
 
 # ---------- 功能4：配置列表管理 ----------
 list_all_conf_files() {
-  ls -1 "$CONF_DIR" 2>/dev/null | grep -E '\.conf(\..*)?$' || true
+  find "$CONF_DIR" -maxdepth 1 -type f \( -name '*.conf' -o -name '*.conf.*' \) -printf '%f\n' 2>/dev/null | sort || true
 }
 
 print_conf_list() {
@@ -713,8 +740,8 @@ print_conf_list() {
   local -a enabled_files disabled_files
 
   # 二级列表：先显示已启用（.conf），再显示已停用（.bak/其他后缀）
-  mapfile -t enabled_files < <(ls -1 "$CONF_DIR" 2>/dev/null | grep -E '\.conf$' | sort || true)
-  mapfile -t disabled_files < <(ls -1 "$CONF_DIR" 2>/dev/null | grep -E '\.conf\..+$' | sort || true)
+  mapfile -t enabled_files < <(find "$CONF_DIR" -maxdepth 1 -type f -name '*.conf' -printf '%f\n' 2>/dev/null | sort || true)
+  mapfile -t disabled_files < <(find "$CONF_DIR" -maxdepth 1 -type f -name '*.conf.*' -printf '%f\n' 2>/dev/null | sort || true)
 
   FILES=("${enabled_files[@]}" "${disabled_files[@]}")
 
@@ -827,7 +854,7 @@ modify_conf() {
     fi
   fi
 
-  tmp="$(mktemp /tmp/nginxx-mod-${new_domain}.XXXXXX.conf)"
+  tmp="$(mktemp /tmp/nginxx-mod-"${new_domain}".XXXXXX.conf)"
   build_proxy_conf "$new_domain" "$new_listen" "$new_backend" "$tmp"
 
   # 修改后默认写入 .conf；也可选择立即停用
@@ -871,7 +898,8 @@ delete_conf() {
   fi
 
   # 先删，再校验，失败则无法自动恢复（所以先备份）
-  local backup="${target}.delbak.$(date +%s)"
+  local backup
+  backup="${target}.delbak.$(date +%s)"
   ${SUDO} cp -a "$target" "$backup"
   ${SUDO} rm -f "$target"
 
@@ -889,7 +917,7 @@ delete_conf() {
 }
 
 edit_conf_manual() {
-  local file target backup editor_cmd
+  local file target backup
   file="${1:-}"
   if [[ -z "$file" ]]; then
     error "未指定配置文件。"
@@ -905,16 +933,12 @@ edit_conf_manual() {
   backup="${target}.editbak.$(date +%s)"
   ${SUDO} cp -a "$target" "$backup"
 
-  # 优先使用环境变量 EDITOR，其次 nano，再次 vi
-  if [[ -n "${EDITOR:-}" ]]; then
-    editor_cmd="$EDITOR"
-  elif check_cmd nano; then
-    editor_cmd="nano"
-  else
-    editor_cmd="vi"
+  if ! run_editor "$target"; then
+    ${SUDO} cp -a "$backup" "$target"
+    ${SUDO} rm -f "$backup"
+    error "编辑器启动失败，已恢复原配置。"
+    return 1
   fi
-
-  ${SUDO} "$editor_cmd" "$target"
 
   if nginx_test; then
     reload_nginx_safe
@@ -1026,11 +1050,29 @@ EOF
 }
 
 ensure_acme_installed() {
+  local install_script=""
+
   if [[ -x "$HOME/.acme.sh/acme.sh" ]]; then
     return 0
   fi
+
   note "未检测到 acme.sh，开始安装..."
-  curl https://get.acme.sh | sh
+
+  install_script="$(mktemp /tmp/acme-install.XXXXXX.sh)"
+  if ! curl -fsSL https://get.acme.sh -o "$install_script"; then
+    cleanup_tmp_file "$install_script"
+    error "acme.sh 安装脚本下载失败，请稍后重试。"
+    return 1
+  fi
+
+  if ! sh "$install_script"; then
+    cleanup_tmp_file "$install_script"
+    error "acme.sh 安装脚本执行失败。"
+    return 1
+  fi
+
+  cleanup_tmp_file "$install_script"
+
   if [[ ! -x "$HOME/.acme.sh/acme.sh" ]]; then
     error "acme.sh 安装失败。"
     return 1
@@ -1116,7 +1158,7 @@ ensure_acme_location_for_domain_conf() {
       continue
     fi
 
-    tmp_file="$(mktemp /tmp/nginxx-acme-loc-${domain}.XXXXXX.conf)"
+    tmp_file="$(mktemp /tmp/nginxx-acme-loc-"${domain}".XXXXXX.conf)"
     awk '
       BEGIN{inserted=0}
       {
@@ -1160,7 +1202,7 @@ ensure_http_challenge_server() {
   fi
 
   local tmp_challenge
-  tmp_challenge="$(mktemp /tmp/.acme-challenge-${domain}.XXXXXX.conf)"
+  tmp_challenge="$(mktemp /tmp/.acme-challenge-"${domain}".XXXXXX.conf)"
 
   cat > "$tmp_challenge" <<EOF
 server {
@@ -1248,7 +1290,7 @@ issue_cert() {
   load_email
 
   if [[ -z "${ACME_EMAIL:-}" ]]; then
-    error "未设置邮箱，请先执行“设置邮箱”。"
+    error "未设置邮箱，请先执行\"设置邮箱\"。"
     return 1
   fi
 
@@ -1301,7 +1343,7 @@ issue_cert() {
   "$HOME/.acme.sh/acme.sh" --register-account -m "$ACME_EMAIL" >/dev/null 2>&1 || true
 
   local issue_output retry_after
-  issue_output="$($HOME/.acme.sh/acme.sh --issue -d "$domain" --webroot /usr/share/nginx/html 2>&1)" || {
+  issue_output="$("$HOME/.acme.sh/acme.sh" --issue -d "$domain" --webroot /usr/share/nginx/html 2>&1)" || {
     echo "$issue_output"
     cleanup_http_challenge_server "$challenge_conf"
     reload_nginx_safe || true
@@ -1383,7 +1425,7 @@ issue_cert_for_domain() {
   "$HOME/.acme.sh/acme.sh" --register-account -m "$ACME_EMAIL" >/dev/null 2>&1 || true
 
   local issue_output retry_after
-  issue_output="$($HOME/.acme.sh/acme.sh --issue -d "$domain" --webroot /usr/share/nginx/html 2>&1)" || {
+  issue_output="$("$HOME/.acme.sh/acme.sh" --issue -d "$domain" --webroot /usr/share/nginx/html 2>&1)" || {
     echo "$issue_output"
     cleanup_http_challenge_server "$challenge_conf"
     reload_nginx_safe || true
@@ -1479,7 +1521,7 @@ cert_list_menu() {
   fi
 
   local -a certs
-  local line domain idx renew_status
+  local domain idx renew_status
   mapfile -t certs < <(
     "$HOME/.acme.sh/acme.sh" --list 2>/dev/null | awk 'NR>1 && NF>0 {print $1}'
   )
@@ -1577,9 +1619,11 @@ BLOCK
   [[ -z "$existing_upstream" ]] && existing_upstream="http://127.0.0.1:3000"
 
   if [[ "$existing_upstream" =~ ^https?://127\.0\.0\.1(:[0-9]+)?(/|$) ]]; then
+    # shellcheck disable=SC2016
     host_header='\$host'
     ssl_sni_line=''
   else
+    # shellcheck disable=SC2016
     host_header='\$proxy_host'
     if [[ "$existing_upstream" =~ ^https:// ]]; then
       ssl_sni_line='        proxy_ssl_server_name on;'
@@ -1588,7 +1632,7 @@ BLOCK
     fi
   fi
 
-  tmp="$(mktemp /tmp/nginxx-disable-https-${domain}.XXXXXX.conf)"
+  tmp="$(mktemp /tmp/nginxx-disable-https-"${domain}".XXXXXX.conf)"
   cat > "$tmp" <<EOF
 # managed_by=Nginx-X
 # domain=${domain}
@@ -1641,7 +1685,7 @@ enable_https_from_config_list() {
   local -a confs
   local idx conf_file domain
 
-  mapfile -t confs < <(ls -1 "${CONF_DIR}"/*.conf 2>/dev/null | sort || true)
+  mapfile -t confs < <(find "${CONF_DIR}" -maxdepth 1 -type f -name '*.conf' 2>/dev/null | sort || true)
   if [[ ${#confs[@]} -eq 0 ]]; then
     warn "未找到可启用 HTTPS 的配置文件。"
     return 1
@@ -1742,7 +1786,7 @@ enable_https_for_conf_file() {
   local domain="$1"
   local conf_file="$2"
   local force_port="${3:-}"
-  local ssl_conf tmp listen_port redirect_suffix stream_mode stream_block
+  local tmp listen_port redirect_suffix stream_mode stream_block
 
   if [[ ! -f "$conf_file" ]]; then
     error "配置文件不存在：${conf_file}"
@@ -1780,7 +1824,37 @@ BLOCK
 )
   fi
 
-  tmp="$(mktemp /tmp/nginxx-https-${domain}.XXXXXX.conf)"
+  tmp="$(mktemp /tmp/nginxx-https-"${domain}".XXXXXX.conf)"
+
+  # 复用原配置上游：优先读取注释元数据，避免同端口多域名场景误取到错误上游
+  local existing_upstream host_header ssl_sni_line backend_port_meta upstream_url_meta
+  upstream_url_meta="$(grep -E '^# upstream_url=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# upstream_url=//')"
+  backend_port_meta="$(grep -E '^# backend_port=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# backend_port=//')"
+
+  if [[ -n "$upstream_url_meta" ]]; then
+    existing_upstream="$upstream_url_meta"
+  elif [[ -n "$backend_port_meta" ]]; then
+    existing_upstream="http://127.0.0.1:${backend_port_meta}"
+  else
+    existing_upstream="$(grep -Eo 'proxy_pass [^;]+' "$conf_file" | head -n1 | sed 's/^proxy_pass //')"
+  fi
+
+  [[ -z "$existing_upstream" ]] && existing_upstream="http://127.0.0.1:3000"
+
+  # 外部上游（尤其 https）需要 SNI 与上游 Host，避免 502/握手失败
+  if [[ "$existing_upstream" =~ ^https?://127\.0\.0\.1(:[0-9]+)?(/|$) ]]; then
+    # shellcheck disable=SC2016
+    host_header='\$host'
+    ssl_sni_line=''
+  else
+    # shellcheck disable=SC2016
+    host_header='\$proxy_host'
+    if [[ "$existing_upstream" =~ ^https:// ]]; then
+      ssl_sni_line='        proxy_ssl_server_name on;'
+    else
+      ssl_sni_line=''
+    fi
+  fi
 
   # 生成 HTTPS 配置：继承原监听端口（支持非标端口，如 7777）
   cat > "$tmp" <<EOF
@@ -1815,14 +1889,14 @@ server {
     ssl_prefer_server_ciphers off;
 
     location / {
-        proxy_pass __UPSTREAM_PLACEHOLDER__;
+        proxy_pass ${existing_upstream};
         proxy_http_version 1.1;
 
 ${stream_block}
 
-__SSL_SERVER_NAME_LINE__
+${ssl_sni_line}
 
-        proxy_set_header Host __HOST_HEADER__;
+        proxy_set_header Host ${host_header};
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
@@ -1834,38 +1908,6 @@ __SSL_SERVER_NAME_LINE__
     }
 }
 EOF
-
-  # 复用原配置上游：优先读取注释元数据，避免同端口多域名场景误取到错误上游
-  local existing_upstream host_header ssl_sni_line backend_port_meta upstream_url_meta
-  upstream_url_meta="$(grep -E '^# upstream_url=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# upstream_url=//')"
-  backend_port_meta="$(grep -E '^# backend_port=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# backend_port=//')"
-
-  if [[ -n "$upstream_url_meta" ]]; then
-    existing_upstream="$upstream_url_meta"
-  elif [[ -n "$backend_port_meta" ]]; then
-    existing_upstream="http://127.0.0.1:${backend_port_meta}"
-  else
-    existing_upstream="$(grep -Eo 'proxy_pass [^;]+' "$conf_file" | head -n1 | sed 's/^proxy_pass //')"
-  fi
-
-  [[ -z "$existing_upstream" ]] && existing_upstream="http://127.0.0.1:3000"
-
-  # 外部上游（尤其 https）需要 SNI 与上游 Host，避免 502/握手失败
-  if [[ "$existing_upstream" =~ ^https?://127\.0\.0\.1(:[0-9]+)?(/|$) ]]; then
-    host_header='\$host'
-    ssl_sni_line=''
-  else
-    host_header='\$proxy_host'
-    if [[ "$existing_upstream" =~ ^https:// ]]; then
-      ssl_sni_line='        proxy_ssl_server_name on;'
-    else
-      ssl_sni_line=''
-    fi
-  fi
-
-  sed -i "s|proxy_pass __UPSTREAM_PLACEHOLDER__;|proxy_pass ${existing_upstream};|" "$tmp"
-  sed -i "s|proxy_set_header Host __HOST_HEADER__;|proxy_set_header Host ${host_header};|" "$tmp"
-  sed -i "s|__SSL_SERVER_NAME_LINE__|${ssl_sni_line}|" "$tmp"
 
   if apply_conf_with_rollback "$tmp" "$conf_file"; then
     info "HTTPS 已启用，且已配置 80 -> ${listen_port} 强制跳转。"
@@ -2044,6 +2086,7 @@ show_traffic_stats() {
   require_nginx_installed || return 1
 
   local log_file="/var/log/nginx/access.log"
+  local host_log_file="/var/log/nginx/access.host.log"
   local prev_rx=0 prev_tx=0 initialized=0
 
   while true; do
@@ -2077,10 +2120,10 @@ TX总量: ${tx_total_mb} MB
 RX速率: ${rx_rate} MB/s
 TX速率: ${tx_rate} MB/s
 
-当前启用配置流量（最近5000日志，按域名估算）
+当前启用配置流量（最近5000日志，优先按 Host 专用日志统计）
 EOF
 
-    mapfile -t enabled_confs < <(ls -1 "${CONF_DIR}"/*.conf 2>/dev/null | sort || true)
+    mapfile -t enabled_confs < <(find "${CONF_DIR}" -maxdepth 1 -type f -name '*.conf' 2>/dev/null | sort || true)
     if [[ ${#enabled_confs[@]} -eq 0 ]]; then
       echo "- 无启用配置"
     else
@@ -2088,8 +2131,11 @@ EOF
         local domain req_count bytes_sum bytes_mb
         domain="$(extract_domain_from_conf "$conf")"
 
-        if [[ -f "$log_file" && -n "$domain" ]]; then
-          req_count="$( (tail -n 5000 "$log_file" 2>/dev/null | grep -F "$domain" | wc -l | awk '{print $1}') || true )"
+        if [[ -f "$host_log_file" && -n "$domain" ]]; then
+          req_count="$(tail -n 5000 "$host_log_file" 2>/dev/null | awk -v d="$domain" '$1==d {c++} END{print c+0}')"
+          bytes_sum="$(tail -n 5000 "$host_log_file" 2>/dev/null | awk -v d="$domain" '$1==d && $2 ~ /^[0-9]+$/ {s+=$2} END{print s+0}')"
+        elif [[ -f "$log_file" && -n "$domain" ]]; then
+          req_count="$( (tail -n 5000 "$log_file" 2>/dev/null | grep -F -c "$domain") || true )"
           bytes_sum="$( (tail -n 5000 "$log_file" 2>/dev/null | grep -F "$domain" | awk '{if($10 ~ /^[0-9]+$/) s+=$10} END{print s+0}') || true )"
         else
           req_count="0"
@@ -2097,7 +2143,11 @@ EOF
         fi
 
         bytes_mb="$(awk -v b="$bytes_sum" 'BEGIN{printf "%.2f", b/1024/1024}')"
-        echo "- $(basename "$conf") | 域名: ${domain} | 请求: ${req_count} | 下行: ${bytes_mb} MB"
+        if [[ -f "$host_log_file" ]]; then
+          echo "- $(basename "$conf") | 域名: ${domain} | 请求: ${req_count} | 下行: ${bytes_mb} MB | 来源: host日志"
+        else
+          echo "- $(basename "$conf") | 域名: ${domain} | 请求: ${req_count} | 下行: ${bytes_mb} MB | 来源: access估算"
+        fi
       done
     fi
 
@@ -2151,12 +2201,11 @@ uninstall_script_only() {
   # 2) 清理脚本目录下运行状态文件
   rm -f "${SCRIPT_DIR}/.email.conf" 2>/dev/null || true
 
-  # 3) 彻底删除脚本目录（延迟执行，避免当前进程占用）
+  # 3) 给出手动删除路径，避免后台自删失败难排查
   local dir_to_remove
   dir_to_remove="$(realpath "$SCRIPT_DIR")"
   if [[ -n "$dir_to_remove" && "$dir_to_remove" != "/" ]]; then
-    nohup bash -c "sleep 1; rm -rf '$dir_to_remove'" >/dev/null 2>&1 &
-    info "已安排删除脚本目录：${dir_to_remove}"
+    warn "脚本目录未自动删除，请按需手动清理：${dir_to_remove}"
   fi
 
   info "本脚本卸载完成。"
