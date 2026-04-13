@@ -365,6 +365,100 @@ conf_target_path() {
   echo "${CONF_DIR}/${domain}-${listen_port}.conf"
 }
 
+conf_meta_get() {
+  local conf_file="$1"
+  local key="$2"
+  grep -E "^# ${key}=" "$conf_file" 2>/dev/null | head -n1 | sed "s/^# ${key}=//"
+}
+
+url_host() {
+  local url="$1"
+  url="${url#*://}"
+  url="${url%%/*}"
+  url="${url%%:*}"
+  echo "$url"
+}
+
+url_scheme() {
+  local url="$1"
+  echo "$url" | sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*)://.*#\1#'
+}
+
+default_referer_from_url() {
+  local base="$1"
+  base="${base%/}"
+  echo "${base}/web/index.html"
+}
+
+external_mode_name() {
+  case "$1" in
+    normal) echo "标准模式" ;;
+    media) echo "Stream 模式" ;;
+    emby_http) echo "Emby 分离 HTTP 推流" ;;
+    emby_https) echo "Emby 分离 HTTPS 推流" ;;
+    emby_lily) echo "LilyEmby 方案三" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+select_external_mode() {
+  local current="${1:-normal}"
+  local choice=""
+
+  echo "请选择外部反代模式："
+  echo "1) 标准模式"
+  echo "2) Stream 模式"
+  echo "3) Emby 分离 HTTP 推流"
+  echo "4) Emby 分离 HTTPS 推流"
+  echo "5) LilyEmby 方案三"
+
+  case "$current" in
+    normal) choice="1" ;;
+    media) choice="2" ;;
+    emby_http) choice="3" ;;
+    emby_https) choice="4" ;;
+    emby_lily) choice="5" ;;
+    *) choice="1" ;;
+  esac
+
+  read -rp "选择模式 [1-5] (默认 ${choice}): " input_mode
+  [[ -n "$input_mode" ]] && choice="$input_mode"
+
+  case "$choice" in
+    2) echo "media" ;;
+    3) echo "emby_http" ;;
+    4) echo "emby_https" ;;
+    5) echo "emby_lily" ;;
+    *) echo "normal" ;;
+  esac
+}
+
+ensure_cert_for_domain_interactive() {
+  local domain="$1"
+
+  if valid_ipv4_host "$domain"; then
+    warn "当前使用的是 IP，证书自动申请通常不适用。"
+    return 1
+  fi
+
+  if [[ -f "${SSL_DIR}/${domain}/fullchain.pem" && -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
+    return 0
+  fi
+
+  warn "检测到域名 ${domain} 尚无证书。"
+  if ! ensure_email_interactive; then
+    error "邮箱未设置，无法自动申请证书。"
+    return 1
+  fi
+
+  if ! issue_cert_for_domain "$domain"; then
+    error "证书申请失败。"
+    return 1
+  fi
+
+  return 0
+}
+
 build_proxy_conf() {
   local domain="$1"
   local listen_port="$2"
@@ -410,12 +504,31 @@ build_external_proxy_conf() {
   local domain="$1"
   local listen_port="$2"
   local upstream_url="$3"
-  local stream_mode="$4"
+  local external_mode="$4"
   local out="$5"
-  local stream_block=""
+  local https_enabled="${6:-0}"
+  local stream_upstream_url="${7:-}"
+  local source_site_url="${8:-}"
+  local referer_url="${9:-}"
+  local main_stream_block=""
+  local stream_location_block=""
+  local lily_block=""
+  local redirect_block=""
+  local main_host_block=""
+  local main_header_block=""
+  local stream_sni_block=""
+  local redirect_suffix=""
+  local upstream_host stream_host
 
-  if [[ "$stream_mode" == "media" ]]; then
-    stream_block=$(cat <<'BLOCK'
+  upstream_host="$(url_host "$upstream_url")"
+  stream_host="$(url_host "$stream_upstream_url")"
+
+  [[ -z "$source_site_url" ]] && source_site_url="$upstream_url"
+  [[ -z "$referer_url" && -n "$source_site_url" ]] && referer_url="$(default_referer_from_url "$source_site_url")"
+
+  case "$external_mode" in
+    media)
+      main_stream_block=$(cat <<'BLOCK'
         # Stream 转发优化（Emby/Jellyfin 等）
         proxy_request_buffering off;
         proxy_buffering off;
@@ -426,21 +539,175 @@ build_external_proxy_conf() {
         client_max_body_size 0;
 BLOCK
 )
+      ;;
+    emby_http|emby_https|emby_lily)
+      redirect_block="        proxy_redirect ${stream_upstream_url} https://${domain}/s1/;"
+      if [[ "$external_mode" == "emby_lily" ]]; then
+        redirect_block+=$'\n'
+        redirect_block+="        proxy_redirect ${source_site_url} https://${domain};"
+        lily_block=$(cat <<EOF
+        proxy_set_header Accept-Encoding "";
+        sub_filter_types application/json text/xml text/plain;
+        sub_filter_once off;
+        sub_filter '${source_site_url}' 'https://${domain}';
+        sub_filter '${stream_upstream_url}' 'https://${domain}/s1';
+EOF
+)
+      fi
+
+      if [[ "$external_mode" != "emby_http" ]]; then
+        stream_sni_block=$(cat <<EOF
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${stream_host};
+EOF
+)
+      fi
+
+      stream_location_block=$(cat <<EOF
+
+    location /s1/ {
+        rewrite ^/s1(/.*)\$ \$1 break;
+        proxy_pass ${stream_upstream_url};
+        proxy_http_version 1.1;
+${stream_sni_block}
+        proxy_set_header Range \$http_range;
+        proxy_set_header If-Range \$http_if_range;
+        proxy_set_header Referer "${referer_url}";
+        proxy_set_header Host \$proxy_host;
+
+        proxy_buffering off;
+        proxy_connect_timeout 60s;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+
+        proxy_set_header X-Real-IP "";
+        proxy_set_header X-Forwarded-For "";
+        proxy_set_header X-Forwarded-Proto "";
+        proxy_set_header X-Forwarded-Host "";
+        proxy_set_header Forwarded "";
+        proxy_set_header Via "";
+
+        proxy_hide_header X-Powered-By;
+        proxy_hide_header X-Frame-Options;
+        proxy_hide_header X-Content-Type-Options;
+    }
+EOF
+)
+      ;;
+  esac
+
+  if [[ "$external_mode" =~ ^emby_ ]]; then
+    main_host_block=$(cat <<EOF
+        proxy_set_header Host ${upstream_host};
+        proxy_ssl_name ${upstream_host};
+EOF
+)
+    main_header_block=$(cat <<EOF
+        proxy_set_header Range \$http_range;
+        proxy_set_header If-Range \$http_if_range;
+${redirect_block}
+${lily_block}
+        proxy_set_header X-Real-IP "";
+        proxy_set_header X-Forwarded-For "";
+        proxy_set_header X-Forwarded-Proto "";
+        proxy_set_header X-Forwarded-Host "";
+        proxy_set_header X-Forwarded-Port "";
+        proxy_set_header Forwarded "";
+        proxy_set_header Via "";
+
+        proxy_hide_header X-Powered-By;
+        proxy_hide_header X-Frame-Options;
+        proxy_hide_header X-Content-Type-Options;
+EOF
+)
+  else
+    # shellcheck disable=SC2016
+    main_host_block='        proxy_set_header Host $proxy_host;'
+    main_header_block=$(cat <<'EOF'
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
+EOF
+)
+    if [[ -n "$main_stream_block" ]]; then
+      main_header_block="${main_stream_block}
+
+${main_header_block}"
+    fi
   fi
 
-  cat > "$out" <<EOF
+  if [[ "$listen_port" == "443" ]]; then
+    redirect_suffix=""
+  else
+    redirect_suffix=":${listen_port}"
+  fi
+
+  if [[ "$https_enabled" == "1" ]]; then
+    cat > "$out" <<EOF
 # managed_by=Nginx-X
 # mode=external
-# stream_mode=${stream_mode}
+# external_mode=${external_mode}
 # domain=${domain}
 # listen_port=${listen_port}
 # upstream_url=${upstream_url}
+# stream_upstream_url=${stream_upstream_url}
+# source_site_url=${source_site_url}
+# referer_url=${referer_url}
+
+server {
+    listen 80;
+    server_name ${domain};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /usr/share/nginx/html;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+
+    return 301 https://\$host${redirect_suffix}\$request_uri;
+}
+
+server {
+    listen ${listen_port} ssl;
+    http2 on;
+    server_name ${domain};
+
+    ssl_certificate     ${SSL_DIR}/${domain}/fullchain.pem;
+    ssl_certificate_key ${SSL_DIR}/${domain}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    location / {
+        proxy_pass ${upstream_url};
+        proxy_http_version 1.1;
+${main_host_block}
+        proxy_ssl_server_name on;
+
+${main_header_block}
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+${stream_location_block}
+}
+EOF
+  else
+    cat > "$out" <<EOF
+# managed_by=Nginx-X
+# mode=external
+# external_mode=${external_mode}
+# domain=${domain}
+# listen_port=${listen_port}
+# upstream_url=${upstream_url}
+# stream_upstream_url=${stream_upstream_url}
+# source_site_url=${source_site_url}
+# referer_url=${referer_url}
 
 server {
     listen ${listen_port};
     server_name ${domain};
 
-    # ACME HTTP-01 验证路径（证书申请/续期）
     location ^~ /.well-known/acme-challenge/ {
         root /usr/share/nginx/html;
         default_type "text/plain";
@@ -450,25 +717,17 @@ server {
     location / {
         proxy_pass ${upstream_url};
         proxy_http_version 1.1;
-
-${stream_block}
-
-        # 外部上游建议保留 SNI
+${main_host_block}
         proxy_ssl_server_name on;
 
-        proxy_set_header Host \$proxy_host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-Host \$host;
-        proxy_set_header X-Forwarded-Port \$server_port;
-
+${main_header_block}
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
     }
+${stream_location_block}
 }
 EOF
-
+  fi
 }
 
 apply_conf_with_rollback() {
@@ -615,7 +874,8 @@ add_reverse_proxy() {
 }
 
 add_external_url_proxy() {
-  local domain listen_port upstream_url target tmp mode stream_mode
+  local domain listen_port upstream_url target tmp external_mode
+  local stream_upstream_url="" source_site_url="" referer_url=""
   local desired_port create_port force_enable_https="0"
 
   require_nginx_installed || return 1
@@ -641,14 +901,25 @@ add_external_url_proxy() {
     return 1
   fi
 
-  echo "请选择外部反代模式："
-  echo "1) 标准模式"
-  echo "2) Stream 模式"
-  read -rp "选择模式 [1/2]: " mode
-  case "$mode" in
-    2) stream_mode="media" ;;
-    *) stream_mode="normal" ;;
-  esac
+  external_mode="$(select_external_mode normal)"
+
+  if [[ "$external_mode" =~ ^emby_ ]]; then
+    read -rp "请输入推流节点 URL（http/https）: " stream_upstream_url
+    if [[ ! "$stream_upstream_url" =~ ^https?:// ]]; then
+      error "推流节点 URL 格式不合法，必须以 http:// 或 https:// 开头。"
+      return 1
+    fi
+
+    read -rp "请输入源站公开 URL（用于重定向/替换，默认与主上游相同）: " source_site_url
+    [[ -z "$source_site_url" ]] && source_site_url="$upstream_url"
+    if [[ ! "$source_site_url" =~ ^https?:// ]]; then
+      error "源站公开 URL 格式不合法，必须以 http:// 或 https:// 开头。"
+      return 1
+    fi
+
+    read -rp "请输入 Referer URL（默认 ${source_site_url%/}/web/index.html）: " referer_url
+    [[ -z "$referer_url" ]] && referer_url="$(default_referer_from_url "$source_site_url")"
+  fi
 
   if is_port_used_os "$listen_port"; then
     warn "监听端口 ${listen_port} 当前已被占用（Nginx 多站点场景通常可复用）。"
@@ -680,7 +951,7 @@ add_external_url_proxy() {
   target="$(conf_target_path "$domain" "$desired_port")"
   tmp="$(mktemp /tmp/nginxx-external-"${domain}".XXXXXX.conf)"
 
-  build_external_proxy_conf "$domain" "$create_port" "$upstream_url" "$stream_mode" "$tmp"
+  build_external_proxy_conf "$domain" "$create_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url"
   if apply_conf_with_rollback "$tmp" "$target"; then
     info "外部反代配置已生效：${target}"
 
@@ -819,13 +1090,21 @@ disable_conf() {
 }
 
 modify_conf() {
-  local file src new_domain new_listen new_backend tmp new_target
+  local file src mode
   file="${1:-}"
   if [[ -z "$file" ]]; then
     error "未指定配置文件。"
     return 1
   fi
   src="${CONF_DIR}/${file}"
+
+  mode="$(conf_meta_get "$src" mode)"
+  if [[ "$mode" == "external" ]]; then
+    modify_external_conf "$file"
+    return $?
+  fi
+
+  local new_domain new_listen new_backend tmp new_target
 
   read -rp "新的域名: " new_domain
   if ! valid_domain "$new_domain"; then
@@ -877,6 +1156,169 @@ modify_conf() {
       fi
     else
       info "配置已修改并保持启用。"
+    fi
+  fi
+
+  rm -f "$tmp"
+}
+
+modify_external_conf() {
+  local file src current_domain current_listen current_upstream_url current_mode
+  local current_stream_upstream_url current_source_site_url current_referer_url
+  local new_domain new_listen new_upstream_url new_mode new_stream_upstream_url new_source_site_url new_referer_url
+  local tmp new_target desired_port create_port force_enable_https="0"
+  local was_https_enabled=0 was_disabled=0 domain_changed=0
+
+  file="${1:-}"
+  src="${CONF_DIR}/${file}"
+  [[ -f "$src" ]] || {
+    error "配置文件不存在：${src}"
+    return 1
+  }
+
+  current_domain="$(extract_domain_from_conf "$src")"
+  current_listen="$(conf_meta_get "$src" listen_port)"
+  current_upstream_url="$(conf_meta_get "$src" upstream_url)"
+  current_mode="$(conf_meta_get "$src" external_mode)"
+  current_stream_upstream_url="$(conf_meta_get "$src" stream_upstream_url)"
+  current_source_site_url="$(conf_meta_get "$src" source_site_url)"
+  current_referer_url="$(conf_meta_get "$src" referer_url)"
+
+  [[ -z "$current_mode" ]] && current_mode="normal"
+  [[ -z "$current_listen" ]] && current_listen="80"
+  [[ -z "$current_source_site_url" ]] && current_source_site_url="$current_upstream_url"
+  [[ -z "$current_referer_url" && -n "$current_source_site_url" ]] && current_referer_url="$(default_referer_from_url "$current_source_site_url")"
+
+  conf_https_enabled "$src" && was_https_enabled=1
+  [[ ! "$file" =~ \.conf$ ]] && was_disabled=1
+
+  read -rp "新的域名（当前 ${current_domain}）: " new_domain
+  [[ -z "$new_domain" ]] && new_domain="$current_domain"
+  if ! valid_server_name_input "$new_domain"; then
+    error "域名/IP 格式不合法。"
+    return 1
+  fi
+
+  read -rp "新的监听端口（当前 ${current_listen}）: " new_listen
+  [[ -z "$new_listen" ]] && new_listen="$current_listen"
+  if ! valid_port "$new_listen"; then
+    error "监听端口不合法。"
+    return 1
+  fi
+
+  read -rp "新的主上游 URL（当前 ${current_upstream_url}）: " new_upstream_url
+  [[ -z "$new_upstream_url" ]] && new_upstream_url="$current_upstream_url"
+  if [[ ! "$new_upstream_url" =~ ^https?:// ]]; then
+    error "主上游 URL 格式不合法。"
+    return 1
+  fi
+
+  note "当前方案：$(external_mode_name "$current_mode")"
+  new_mode="$(select_external_mode "$current_mode")"
+
+  new_stream_upstream_url="$current_stream_upstream_url"
+  new_source_site_url="$current_source_site_url"
+  new_referer_url="$current_referer_url"
+
+  if [[ "$new_mode" =~ ^emby_ ]]; then
+    read -rp "新的推流节点 URL（当前 ${current_stream_upstream_url:-未设置}）: " input_stream
+    [[ -n "$input_stream" ]] && new_stream_upstream_url="$input_stream"
+    if [[ ! "$new_stream_upstream_url" =~ ^https?:// ]]; then
+      error "推流节点 URL 格式不合法。"
+      return 1
+    fi
+
+    read -rp "新的源站公开 URL（当前 ${current_source_site_url:-$new_upstream_url}）: " input_source
+    [[ -n "$input_source" ]] && new_source_site_url="$input_source"
+    [[ -z "$new_source_site_url" ]] && new_source_site_url="$new_upstream_url"
+    if [[ ! "$new_source_site_url" =~ ^https?:// ]]; then
+      error "源站公开 URL 格式不合法。"
+      return 1
+    fi
+
+    read -rp "新的 Referer URL（当前 ${current_referer_url:-$(default_referer_from_url "$new_source_site_url")}) : " input_referer
+    [[ -n "$input_referer" ]] && new_referer_url="$input_referer"
+    [[ -z "$new_referer_url" ]] && new_referer_url="$(default_referer_from_url "$new_source_site_url")"
+  else
+    new_stream_upstream_url=""
+    new_source_site_url=""
+    new_referer_url=""
+  fi
+
+  desired_port="$new_listen"
+  create_port="$new_listen"
+  [[ "$new_domain" != "$current_domain" ]] && domain_changed=1
+
+  if is_port_used_os "$new_listen"; then
+    warn "监听端口 ${new_listen} 当前已被占用。"
+    if ! confirm "是否继续写入配置并交由 nginx -t 校验？"; then
+      info "已取消修改。"
+      return 0
+    fi
+
+    if [[ "$new_listen" == "443" ]] && [[ ! -f "${SSL_DIR}/${new_domain}/fullchain.pem" || ! -f "${SSL_DIR}/${new_domain}/privkey.pem" ]]; then
+      warn "检测到 443 端口复用且新域名暂无证书，已自动改为先使用 80 端口创建配置。"
+      create_port="80"
+    fi
+
+    if port_has_ssl_listener "$desired_port"; then
+      if [[ -f "${SSL_DIR}/${new_domain}/fullchain.pem" && -f "${SSL_DIR}/${new_domain}/privkey.pem" ]]; then
+        warn "检测到端口 ${desired_port} 已用于 HTTPS，且新域名已有证书。"
+        warn "将先写入临时 HTTP 配置，再自动切换为 ${desired_port} HTTPS。"
+        create_port="80"
+        force_enable_https="1"
+      else
+        warn "检测到端口 ${desired_port} 已用于 HTTPS，但新域名暂无证书。"
+        warn "已自动改为先使用 80 端口创建配置。"
+        create_port="80"
+      fi
+    fi
+  fi
+
+  new_target="$(conf_target_path "$new_domain" "$desired_port")"
+  tmp="$(mktemp /tmp/nginxx-external-mod-"${new_domain}".XXXXXX.conf)"
+  build_external_proxy_conf "$new_domain" "$create_port" "$new_upstream_url" "$new_mode" "$tmp" "0" "$new_stream_upstream_url" "$new_source_site_url" "$new_referer_url"
+
+  if apply_conf_with_rollback "$tmp" "$new_target"; then
+    if [[ "$src" != "$new_target" && -f "$src" ]]; then
+      ${SUDO} rm -f "$src"
+    fi
+
+    if [[ "$force_enable_https" == "1" || "$was_https_enabled" == "1" ]]; then
+      if [[ ! -f "${SSL_DIR}/${new_domain}/fullchain.pem" || ! -f "${SSL_DIR}/${new_domain}/privkey.pem" ]]; then
+        if ! ensure_cert_for_domain_interactive "$new_domain"; then
+          warn "新域名证书申请未完成，当前保留为 HTTP 配置。"
+        elif enable_https_for_conf_file "$new_domain" "$new_target" "$desired_port"; then
+          info "已完成：修改配置并重新启用 HTTPS。"
+        else
+          warn "证书已就绪，但重新启用 HTTPS 失败。"
+        fi
+      elif enable_https_for_conf_file "$new_domain" "$new_target" "$desired_port"; then
+        info "已完成：修改配置并重新启用 HTTPS。"
+      else
+        warn "修改成功，但重新启用 HTTPS 失败。"
+      fi
+    elif (( domain_changed == 1 )) && ! valid_ipv4_host "$new_domain" && [[ ! -f "${SSL_DIR}/${new_domain}/fullchain.pem" || ! -f "${SSL_DIR}/${new_domain}/privkey.pem" ]]; then
+      if confirm "检测到更换了域名且新域名暂无证书，是否立即申请并启用 HTTPS？"; then
+        if ensure_cert_for_domain_interactive "$new_domain" && enable_https_for_conf_file "$new_domain" "$new_target" "$desired_port"; then
+          info "已完成：修改配置、新域名证书申请与 HTTPS 启用。"
+        else
+          warn "新域名证书申请或 HTTPS 启用失败，当前保留 HTTP 配置。"
+        fi
+      fi
+    fi
+
+    if (( was_disabled == 1 )); then
+      ${SUDO} mv "$new_target" "${new_target}.bak"
+      if nginx_test; then
+        reload_nginx_safe
+        info "原配置处于停用状态，已保持为停用。"
+      else
+        ${SUDO} mv "${new_target}.bak" "$new_target"
+        error "恢复停用状态失败，已恢复为启用配置。"
+        ${SUDO} nginx -t || true
+        return 1
+      fi
     fi
   fi
 
@@ -1594,7 +2036,31 @@ conf_https_enabled() {
 disable_https_for_conf_file() {
   local domain="$1"
   local conf_file="$2"
+  local mode external_mode upstream_url stream_upstream_url source_site_url referer_url
   local listen_port existing_upstream host_header ssl_sni_line stream_mode stream_block tmp
+
+  mode="$(conf_meta_get "$conf_file" mode)"
+  if [[ "$mode" == "external" ]]; then
+    listen_port="$(conf_meta_get "$conf_file" listen_port)"
+    [[ -z "$listen_port" ]] && listen_port="80"
+    external_mode="$(conf_meta_get "$conf_file" external_mode)"
+    upstream_url="$(conf_meta_get "$conf_file" upstream_url)"
+    stream_upstream_url="$(conf_meta_get "$conf_file" stream_upstream_url)"
+    source_site_url="$(conf_meta_get "$conf_file" source_site_url)"
+    referer_url="$(conf_meta_get "$conf_file" referer_url)"
+    [[ -z "$external_mode" ]] && external_mode="normal"
+
+    tmp="$(mktemp /tmp/nginxx-disable-https-"${domain}".XXXXXX.conf)"
+    build_external_proxy_conf "$domain" "$listen_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url"
+    if apply_conf_with_rollback "$tmp" "$conf_file"; then
+      info "HTTPS 已停用：$(basename "$conf_file")"
+      rm -f "$tmp"
+      return 0
+    fi
+
+    rm -f "$tmp"
+    return 1
+  fi
 
   listen_port="$(grep -E '^# listen_port=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# listen_port=//')"
   [[ -z "$listen_port" ]] && listen_port="80"
@@ -1786,6 +2252,7 @@ enable_https_for_conf_file() {
   local domain="$1"
   local conf_file="$2"
   local force_port="${3:-}"
+  local mode external_mode upstream_url stream_upstream_url source_site_url referer_url
   local tmp listen_port redirect_suffix stream_mode stream_block
 
   if [[ ! -f "$conf_file" ]]; then
@@ -1802,6 +2269,28 @@ enable_https_for_conf_file() {
   listen_port="$(grep -E '^# listen_port=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# listen_port=//')"
   [[ -n "$force_port" ]] && listen_port="$force_port"
   [[ -z "$listen_port" ]] && listen_port="443"
+
+  mode="$(conf_meta_get "$conf_file" mode)"
+  if [[ "$mode" == "external" ]]; then
+    external_mode="$(conf_meta_get "$conf_file" external_mode)"
+    upstream_url="$(conf_meta_get "$conf_file" upstream_url)"
+    stream_upstream_url="$(conf_meta_get "$conf_file" stream_upstream_url)"
+    source_site_url="$(conf_meta_get "$conf_file" source_site_url)"
+    referer_url="$(conf_meta_get "$conf_file" referer_url)"
+    [[ -z "$external_mode" ]] && external_mode="normal"
+
+    tmp="$(mktemp /tmp/nginxx-https-"${domain}".XXXXXX.conf)"
+    build_external_proxy_conf "$domain" "$listen_port" "$upstream_url" "$external_mode" "$tmp" "1" "$stream_upstream_url" "$source_site_url" "$referer_url"
+    if apply_conf_with_rollback "$tmp" "$conf_file"; then
+      info "HTTPS 已启用，且已配置 80 -> ${listen_port} 强制跳转。"
+      rm -f "$tmp"
+      return 0
+    fi
+
+    rm -f "$tmp"
+    return 1
+  fi
+
   if [[ "$listen_port" == "443" ]]; then
     redirect_suffix=""
   else
