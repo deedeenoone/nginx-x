@@ -405,12 +405,12 @@ select_external_mode() {
   local current="${1:-normal}"
   local choice=""
 
-  echo "请选择外部反代模式："
-  echo "1) 标准模式"
-  echo "2) Stream 模式"
-  echo "3) Emby 分离 HTTP 推流"
-  echo "4) Emby 分离 HTTPS 推流"
-  echo "5) LilyEmby 方案三"
+  echo "请选择外部反代模式：" >&2
+  echo "1) 标准模式" >&2
+  echo "2) Stream 模式" >&2
+  echo "3) Emby 分离 HTTP 推流" >&2
+  echo "4) Emby 分离 HTTPS 推流" >&2
+  echo "5) LilyEmby 方案三" >&2
 
   case "$current" in
     normal) choice="1" ;;
