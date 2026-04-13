@@ -2047,11 +2047,28 @@ conf_https_enabled() {
   grep -q '^# https_enabled=true' "$conf_file" 2>/dev/null || grep -qE 'listen[[:space:]]+[0-9]+[[:space:]]+ssl' "$conf_file" 2>/dev/null
 }
 
+health_probe_url() {
+  local url="$1"
+  local insecure="${2:-0}"
+  local curl_args=(-sS -o /dev/null --connect-timeout 8 --max-time 15 -L -w '%{http_code}|%{remote_ip}|%{url_effective}|%{ssl_verify_result}')
+  local out=""
+
+  if [[ "$insecure" == "1" ]]; then
+    curl_args=(-k "${curl_args[@]}")
+  fi
+
+  out="$(curl "${curl_args[@]}" "$url" 2>/dev/null || true)"
+  [[ -z "$out" ]] && out="000|||"
+  echo "$out"
+}
+
 health_check_conf_file() {
   local conf_file="$1"
   local domain listen_port mode upstream_url stream_upstream_url
-  local scheme target_url status_label http_code remote_ip dns_ips tls_days
-  local status_ok=1
+  local scheme target_url status_label http_code remote_ip dns_ips tls_days verify_result effective_url
+  local upstream_http_code upstream_verify_result upstream_status
+  local stream_http_code stream_verify_result stream_status
+  local status_ok=0
 
   domain="$(extract_domain_from_conf "$conf_file")"
   listen_port="$(conf_meta_get "$conf_file" listen_port)"
@@ -2077,8 +2094,7 @@ health_check_conf_file() {
   dns_ips="$(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd ',' - || true)"
   [[ -z "$dns_ips" ]] && dns_ips="未解析"
 
-  remote_ip="$(curl -k -sS -o /dev/null --connect-timeout 8 --max-time 15 -w '%{remote_ip}' "$target_url" 2>/dev/null || true)"
-  http_code="$(curl -k -sS -o /dev/null --connect-timeout 8 --max-time 15 -L -w '%{http_code}' "$target_url" 2>/dev/null || true)"
+  IFS='|' read -r http_code remote_ip effective_url verify_result <<< "$(health_probe_url "$target_url" 0)"
   [[ -z "$http_code" ]] && http_code="000"
 
   if [[ "$scheme" == "https" ]]; then
@@ -2086,13 +2102,49 @@ health_check_conf_file() {
     [[ -z "$tls_days" ]] && tls_days="-"
   else
     tls_days="-"
+    verify_result="0"
   fi
 
-  if [[ "$http_code" =~ ^2|3 ]]; then
+  if [[ "$http_code" =~ ^[23] ]]; then
     status_label="正常"
+    status_ok=0
+  elif [[ "$scheme" == "https" && "$verify_result" != "0" ]]; then
+    status_label="证书校验失败"
+    status_ok=2
+  elif [[ "$http_code" =~ ^401|403|404$ ]]; then
+    status_label="可访问但需确认"
+    status_ok=1
   else
     status_label="异常"
-    status_ok=0
+    status_ok=2
+  fi
+
+  upstream_status="-"
+  if [[ -n "$upstream_url" ]]; then
+    IFS='|' read -r upstream_http_code _ _ upstream_verify_result <<< "$(health_probe_url "$upstream_url" 0)"
+    if [[ "$upstream_http_code" =~ ^[23] ]]; then
+      upstream_status="正常"
+    elif [[ "$(url_scheme "$upstream_url")" == "https" && "$upstream_verify_result" != "0" ]]; then
+      upstream_status="证书校验失败"
+      (( status_ok < 1 )) && status_ok=1
+    else
+      upstream_status="异常(${upstream_http_code})"
+      (( status_ok < 1 )) && status_ok=1
+    fi
+  fi
+
+  stream_status="-"
+  if [[ -n "$stream_upstream_url" ]]; then
+    IFS='|' read -r stream_http_code _ _ stream_verify_result <<< "$(health_probe_url "$stream_upstream_url" 0)"
+    if [[ "$stream_http_code" =~ ^[23] ]]; then
+      stream_status="正常"
+    elif [[ "$(url_scheme "$stream_upstream_url")" == "https" && "$stream_verify_result" != "0" ]]; then
+      stream_status="证书校验失败"
+      (( status_ok < 1 )) && status_ok=1
+    else
+      stream_status="异常(${stream_http_code})"
+      (( status_ok < 1 )) && status_ok=1
+    fi
   fi
 
   echo "- $(basename "$conf_file")"
@@ -2101,12 +2153,18 @@ health_check_conf_file() {
   echo "  协议: ${scheme^^} | HTTP: ${http_code} | 状态: ${status_label}"
   echo "  DNS: ${dns_ips}"
   [[ -n "$remote_ip" ]] && echo "  命中IP: ${remote_ip}"
+  [[ -n "$effective_url" && "$effective_url" != "$target_url" ]] && echo "  最终跳转: ${effective_url}"
   if [[ "$scheme" == "https" ]]; then
     echo "  证书剩余天数: ${tls_days}"
+    echo "  证书校验: $( [[ "$verify_result" == "0" ]] && echo "通过" || echo "失败(${verify_result})" )"
   fi
   if [[ "$mode" == "external" ]]; then
     echo "  主上游: ${upstream_url}"
-    [[ -n "$stream_upstream_url" ]] && echo "  推流上游: ${stream_upstream_url}"
+    echo "  主上游状态: ${upstream_status}"
+    if [[ -n "$stream_upstream_url" ]]; then
+      echo "  推流上游: ${stream_upstream_url}"
+      echo "  推流上游状态: ${stream_status}"
+    fi
   else
     echo "  后端端口: $(conf_meta_get "$conf_file" backend_port)"
   fi
