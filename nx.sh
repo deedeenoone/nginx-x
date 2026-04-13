@@ -2811,6 +2811,7 @@ realtime_info_menu() {
     echo "========== 实时信息 =========="
     echo "1) 实时信息"
     echo "2) 流量统计"
+    echo "3) 健康检查"
     echo "0) 返回上一级"
     echo "============================="
     read -rp "请选择: " c
@@ -2818,8 +2819,9 @@ realtime_info_menu() {
     case "$c" in
       1) show_nginx_realtime_status ;;
       2) show_traffic_stats ;;
+      3) site_health_menu ;;
       0) return 0 ;;
-      *) warn "无效输入。请输入 0-2 之间的菜单编号。"; pause ;;
+      *) warn "无效输入。请输入 0-3 之间的菜单编号。"; pause ;;
     esac
   done
 }
@@ -2976,8 +2978,7 @@ main_menu() {
   echo "2) 配置管理"
   echo "3) 证书管理"
   echo "4) 实时信息"
-  echo "5) 健康检查"
-  echo "6) 卸载"
+  echo "5) 卸载"
   echo "0) 退出"
   echo "========================================"
 }
@@ -2995,10 +2996,9 @@ main() {
       2) config_entry_menu ;;
       3) cert_menu ;;
       4) realtime_info_menu ;;
-      5) site_health_menu ;;
-      6) uninstall_menu ;;
+      5) uninstall_menu ;;
       0) info "已退出 ${APP_NAME}。"; exit 0 ;;
-      *) warn "无效输入，请输入主菜单中的编号（0-6）。"; pause ;;
+      *) warn "无效输入，请输入主菜单中的编号（0-5）。"; pause ;;
     esac
   done
 }
