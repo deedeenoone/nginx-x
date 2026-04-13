@@ -72,6 +72,7 @@ run_safe() {
 run_editor() {
   local target="$1"
   local editor_cmd
+  local -a editor_args
 
   if [[ -n "${EDITOR:-}" ]]; then
     editor_cmd="$EDITOR"
@@ -81,11 +82,13 @@ run_editor() {
     editor_cmd="vi"
   fi
 
-  # shellcheck disable=SC2016
+  read -r -a editor_args <<< "$editor_cmd"
+  [[ ${#editor_args[@]} -gt 0 ]] || return 1
+
   if [[ -n "$SUDO" ]]; then
-    ${SUDO} env EDITOR_CMD="$editor_cmd" bash -lc 'eval "\$EDITOR_CMD \"\$1\""' _ "$target"
+    ${SUDO} "${editor_args[@]}" "$target"
   else
-    env EDITOR_CMD="$editor_cmd" bash -lc 'eval "\$EDITOR_CMD \"\$1\""' _ "$target"
+    "${editor_args[@]}" "$target"
   fi
 }
 
@@ -1606,7 +1609,7 @@ ensure_acme_location_for_domain_conf() {
   local -a matches
   local conf_file tmp_file
 
-  mapfile -t matches < <(grep -l "^# domain=${domain}$" "${CONF_DIR}"/*.conf 2>/dev/null || true)
+  mapfile -t matches < <(awk -v d="$domain" 'FNR==1{found=0} $0=="# domain=" d {found=1} ENDFILE{if(found) print FILENAME}' "${CONF_DIR}"/*.conf 2>/dev/null || true)
   [[ ${#matches[@]} -gt 0 ]] || return 0
 
   for conf_file in "${matches[@]}"; do
@@ -2098,7 +2101,8 @@ health_check_conf_file() {
   [[ -z "$http_code" ]] && http_code="000"
 
   if [[ "$scheme" == "https" ]]; then
-    tls_days="$(echo | openssl s_client -servername "$domain" -connect "${domain}:${listen_port}" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | sed 's/notAfter=//' | xargs -I{} date -d '{}' +%s 2>/dev/null | awk -v now="$(date +%s)" '{if($1>0) printf "%d", int(($1-now)/86400); else print "-"}' || true)"
+    # shellcheck disable=SC2016
+    tls_days="$(timeout 8s bash -lc 'echo | openssl s_client -servername "$0" -connect "$0:$1" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null' "$domain" "$listen_port" | sed 's/notAfter=//' | xargs -I{} date -d '{}' +%s 2>/dev/null | awk -v now="$(date +%s)" '{if($1>0) printf "%d", int(($1-now)/86400); else print "-"}' || true)"
     [[ -z "$tls_days" ]] && tls_days="-"
   else
     tls_days="-"
@@ -2437,7 +2441,7 @@ enable_https_for_domain_value() {
   local -a matches
   local idx conf_file
 
-  mapfile -t matches < <(grep -l "^# domain=${domain}$" "${CONF_DIR}"/*.conf 2>/dev/null || true)
+  mapfile -t matches < <(awk -v d="$domain" 'FNR==1{found=0} $0=="# domain=" d {found=1} ENDFILE{if(found) print FILENAME}' "${CONF_DIR}"/*.conf 2>/dev/null || true)
 
   if [[ ${#matches[@]} -eq 0 ]]; then
     error "未找到该域名对应配置：${domain}"
