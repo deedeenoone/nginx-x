@@ -59,7 +59,7 @@ check_cmd() {
 
 require_nginx_installed() {
   if ! check_cmd nginx; then
-    error "未检测到 Nginx，请先执行 [1) 安装 Nginx]。"
+    error "未检测到 Nginx。请先到主菜单执行 [1) 安装升级Nginx]。"
     return 1
   fi
 }
@@ -762,7 +762,7 @@ apply_conf_with_rollback() {
   else
     ${SUDO} rm -f "$target_conf"
   fi
-  error "配置测试失败，已自动撤销本次修改。"
+  error "配置测试失败，已自动撤销本次修改。请根据上面的 nginx -t 输出检查具体报错。"
   echo "$test_output"
   return 1
 }
@@ -775,19 +775,19 @@ add_reverse_proxy() {
 
   read -rp "请输入域名或本机IP（如 example.com / 192.168.1.10）: " domain
   if ! valid_server_name_input "$domain"; then
-    error "输入格式不合法，请输入域名或 IPv4 地址。"
+    error "输入格式不合法。请输入可解析域名，或 IPv4 地址（例如 192.168.1.10）。"
     return 1
   fi
 
   read -rp "请输入监听端口（如 80/8080）: " listen_port
   if ! valid_port "$listen_port"; then
-    error "监听端口不合法。"
+    error "监听端口不合法。请输入 1-65535 之间的数字。"
     return 1
   fi
 
   read -rp "请输入后端/容器端口（如 3000）: " backend_port
   if ! valid_port "$backend_port"; then
-    error "后端端口不合法。"
+    error "后端端口不合法。请输入 1-65535 之间的数字。"
     return 1
   fi
 
@@ -835,7 +835,7 @@ add_reverse_proxy() {
       if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
         info "已完成：同端口 HTTPS 复用配置已自动启用。"
       else
-        warn "自动切换 HTTPS 失败，请检查证书和配置。"
+        warn "自动切换 HTTPS 失败。请检查证书文件是否存在，以及 nginx 配置是否通过校验。"
       fi
       rm -f "$tmp"
       return 0
@@ -852,7 +852,7 @@ add_reverse_proxy() {
         if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
           info "已完成：反向代理 + HTTPS 启用。"
         else
-          warn "启用 HTTPS 失败，请检查配置后重试。"
+          warn "启用 HTTPS 失败。请检查证书、监听端口占用情况，以及 nginx -t 输出后重试。"
         fi
       fi
     else
@@ -865,10 +865,10 @@ add_reverse_proxy() {
             if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
               info "已完成：反向代理 + 自动证书 + 自动 HTTPS。"
             else
-              warn "证书已申请成功，但启用 HTTPS 失败，请检查配置后重试。"
+              warn "证书已申请成功，但启用 HTTPS 失败。请重点检查监听端口占用和 nginx -t 输出。"
             fi
           else
-            warn "自动证书申请失败，当前仅保留 HTTP 反向代理配置。"
+            warn "自动证书申请失败，当前仅保留 HTTP 反向代理配置。通常是域名未解析到本机、80 端口未放行，或 CDN/防火墙拦截导致。"
           fi
         fi
       fi
@@ -886,13 +886,13 @@ add_external_url_proxy() {
 
   read -rp "请输入域名或本机IP（如 example.com / 192.168.1.10）: " domain
   if ! valid_server_name_input "$domain"; then
-    error "输入格式不合法，请输入域名或 IPv4 地址。"
+    error "输入格式不合法。请输入可解析域名，或 IPv4 地址（例如 192.168.1.10）。"
     return 1
   fi
 
   read -rp "请输入监听端口（如 80/8080）: " listen_port
   if ! valid_port "$listen_port"; then
-    error "监听端口不合法。"
+    error "监听端口不合法。请输入 1-65535 之间的数字。"
     return 1
   fi
 
@@ -901,7 +901,7 @@ add_external_url_proxy() {
 
   read -rp "请输入外部上游 URL（http/https）: " upstream_url
   if [[ ! "$upstream_url" =~ ^https?:// ]]; then
-    error "上游 URL 格式不合法，必须以 http:// 或 https:// 开头。"
+    error "上游 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://example.com。"
     return 1
   fi
 
@@ -910,14 +910,14 @@ add_external_url_proxy() {
   if [[ "$external_mode" =~ ^emby_ ]]; then
     read -rp "请输入推流节点 URL（http/https）: " stream_upstream_url
     if [[ ! "$stream_upstream_url" =~ ^https?:// ]]; then
-      error "推流节点 URL 格式不合法，必须以 http:// 或 https:// 开头。"
+      error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://stream.example.com。"
       return 1
     fi
 
     read -rp "请输入源站公开 URL（用于重定向/替换，默认与主上游相同）: " source_site_url
     [[ -z "$source_site_url" ]] && source_site_url="$upstream_url"
     if [[ ! "$source_site_url" =~ ^https?:// ]]; then
-      error "源站公开 URL 格式不合法，必须以 http:// 或 https:// 开头。"
+      error "源站公开 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://emby.example.com。"
       return 1
     fi
 
@@ -963,7 +963,7 @@ add_external_url_proxy() {
       if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
         info "已完成：同端口 HTTPS 复用配置已自动启用。"
       else
-        warn "自动切换 HTTPS 失败，请检查证书和配置。"
+        warn "自动切换 HTTPS 失败。请检查证书文件是否存在，以及 nginx 配置是否通过校验。"
       fi
       rm -f "$tmp"
       return 0
@@ -980,7 +980,7 @@ add_external_url_proxy() {
         if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
           info "已完成：外部反代 + HTTPS 启用。"
         else
-          warn "启用 HTTPS 失败，请检查配置后重试。"
+          warn "启用 HTTPS 失败。请检查证书、监听端口占用情况，以及 nginx -t 输出后重试。"
         fi
       fi
     else
@@ -992,10 +992,10 @@ add_external_url_proxy() {
             if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
               info "已完成：外部反代 + 自动证书 + 自动 HTTPS。"
             else
-              warn "证书已申请成功，但启用 HTTPS 失败，请检查配置后重试。"
+              warn "证书已申请成功，但启用 HTTPS 失败。请重点检查监听端口占用和 nginx -t 输出。"
             fi
           else
-            warn "自动证书申请失败，当前仅保留 HTTP 反代配置。"
+            warn "自动证书申请失败，当前仅保留 HTTP 反代配置。通常是域名未解析到本机、80 端口未放行，或 CDN/防火墙拦截导致。"
           fi
         fi
       fi
@@ -1021,7 +1021,7 @@ print_conf_list() {
   FILES=("${enabled_files[@]}" "${disabled_files[@]}")
 
   if [[ ${#FILES[@]} -eq 0 ]]; then
-    warn "当前没有可管理的配置文件。"
+    warn "当前没有可管理的配置文件。你可以先去 [添加配置] 或 [外部反代] 创建一个站点。"
     return 1
   fi
 
@@ -1120,21 +1120,21 @@ modify_conf() {
   read -rp "新的域名（当前 ${current_domain}）: " new_domain
   [[ -z "$new_domain" ]] && new_domain="$current_domain"
   if ! valid_server_name_input "$new_domain"; then
-    error "域名/IP 格式不合法。"
+    error "域名/IP 格式不合法。请输入可解析域名，或 IPv4 地址（例如 192.168.1.10）。"
     return 1
   fi
 
   read -rp "新的监听端口（当前 ${current_listen}）: " new_listen
   [[ -z "$new_listen" ]] && new_listen="$current_listen"
   if ! valid_port "$new_listen"; then
-    error "监听端口不合法。"
+    error "监听端口不合法。请输入 1-65535 之间的数字。"
     return 1
   fi
 
   read -rp "新的后端端口（当前 ${current_backend}）: " new_backend
   [[ -z "$new_backend" ]] && new_backend="$current_backend"
   if ! valid_port "$new_backend"; then
-    error "后端端口不合法。"
+    error "后端端口不合法。请输入 1-65535 之间的数字。"
     return 1
   fi
 
@@ -1209,21 +1209,21 @@ modify_external_conf() {
   read -rp "新的域名（当前 ${current_domain}）: " new_domain
   [[ -z "$new_domain" ]] && new_domain="$current_domain"
   if ! valid_server_name_input "$new_domain"; then
-    error "域名/IP 格式不合法。"
+    error "域名/IP 格式不合法。请输入可解析域名，或 IPv4 地址（例如 192.168.1.10）。"
     return 1
   fi
 
   read -rp "新的监听端口（当前 ${current_listen}）: " new_listen
   [[ -z "$new_listen" ]] && new_listen="$current_listen"
   if ! valid_port "$new_listen"; then
-    error "监听端口不合法。"
+    error "监听端口不合法。请输入 1-65535 之间的数字。"
     return 1
   fi
 
   read -rp "新的主上游 URL（当前 ${current_upstream_url}）: " new_upstream_url
   [[ -z "$new_upstream_url" ]] && new_upstream_url="$current_upstream_url"
   if [[ ! "$new_upstream_url" =~ ^https?:// ]]; then
-    error "主上游 URL 格式不合法。"
+    error "主上游 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://example.com。"
     return 1
   fi
 
@@ -1238,7 +1238,7 @@ modify_external_conf() {
     read -rp "新的推流节点 URL（当前 ${current_stream_upstream_url:-未设置}）: " input_stream
     [[ -n "$input_stream" ]] && new_stream_upstream_url="$input_stream"
     if [[ ! "$new_stream_upstream_url" =~ ^https?:// ]]; then
-      error "推流节点 URL 格式不合法。"
+      error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://stream.example.com。"
       return 1
     fi
 
@@ -1246,7 +1246,7 @@ modify_external_conf() {
     [[ -n "$input_source" ]] && new_source_site_url="$input_source"
     [[ -z "$new_source_site_url" ]] && new_source_site_url="$new_upstream_url"
     if [[ ! "$new_source_site_url" =~ ^https?:// ]]; then
-      error "源站公开 URL 格式不合法。"
+      error "源站公开 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://emby.example.com。"
       return 1
     fi
 
@@ -1305,12 +1305,12 @@ modify_external_conf() {
         elif enable_https_for_conf_file "$new_domain" "$new_target" "$desired_port"; then
           info "已完成：修改配置并重新启用 HTTPS。"
         else
-          warn "证书已就绪，但重新启用 HTTPS 失败。"
+          warn "证书已就绪，但重新启用 HTTPS 失败。请检查监听端口占用和 nginx -t 输出。"
         fi
       elif enable_https_for_conf_file "$new_domain" "$new_target" "$desired_port"; then
         info "已完成：修改配置并重新启用 HTTPS。"
       else
-        warn "修改成功，但重新启用 HTTPS 失败。"
+        warn "修改成功，但重新启用 HTTPS 失败。当前配置可能仍是 HTTP，请检查 nginx -t 输出后再试。"
       fi
     elif (( domain_changed == 1 )) && ! valid_ipv4_host "$new_domain" && [[ ! -f "${SSL_DIR}/${new_domain}/fullchain.pem" || ! -f "${SSL_DIR}/${new_domain}/privkey.pem" ]]; then
       if confirm "检测到更换了域名且新域名暂无证书，是否立即申请并启用 HTTPS？"; then
@@ -1431,7 +1431,7 @@ config_file_action_menu() {
       4) run_menu_action edit_conf_manual "$file"; pause; return 0 ;;
       5) run_menu_action delete_conf "$file"; pause; return 0 ;;
       0) return 0 ;;
-      *) warn "无效输入。"; pause ;;
+      *) warn "无效输入。请输入 0-5 之间的菜单编号。"; pause ;;
     esac
   done
 }
@@ -1459,7 +1459,7 @@ config_manage_menu() {
     fi
 
     if ! [[ "$c" =~ ^[0-9]+$ ]] || (( c < 1 || c > ${#FILES[@]} )); then
-      warn "无效序号。"
+      warn "无效序号。请输入列表中存在的配置编号。"
       pause
       continue
     fi
@@ -1484,7 +1484,7 @@ config_entry_menu() {
       2) run_menu_action add_external_url_proxy; pause ;;
       3) config_manage_menu ;;
       0) return 0 ;;
-      *) warn "无效输入。"; pause ;;
+      *) warn "无效输入。请输入 0-3 之间的菜单编号。"; pause ;;
     esac
   done
 }
@@ -1575,7 +1575,7 @@ set_acme_email() {
   local email
   read -rp "请输入证书通知邮箱: " email
   if [[ ! "$email" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
-    error "邮箱格式不合法。"
+    error "邮箱格式不合法。请输入类似 user@example.com 的邮箱地址。"
     return 1
   fi
   save_email "$email"
@@ -1591,7 +1591,7 @@ ensure_email_interactive() {
   warn "当前未设置 Acme 邮箱。"
   read -rp "请输入邮箱（将保存到 ${EMAIL_CONF}）: " email
   if [[ ! "$email" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
-    error "邮箱格式不合法。"
+    error "邮箱格式不合法。请输入类似 user@example.com 的邮箱地址。"
     return 1
   fi
 
@@ -1746,13 +1746,13 @@ issue_cert() {
   load_email
 
   if [[ -z "${ACME_EMAIL:-}" ]]; then
-    error "未设置邮箱，请先执行\"设置邮箱\"。"
+    error "未设置邮箱。请先在证书管理里执行 [1) 设置邮箱]。"
     return 1
   fi
 
   read -rp "请输入要申请证书的域名: " domain
   if ! valid_domain "$domain"; then
-    error "域名格式不合法。"
+    error "域名格式不合法。请输入可签发证书的域名，例如 example.com。"
     return 1
   fi
 
@@ -1810,7 +1810,7 @@ issue_cert() {
       [[ -n "$retry_after" ]] && warn "可重试时间（UTC）：$retry_after"
       warn "这是 CA 侧限制，不是你服务器或端口配置问题。"
     else
-      error "证书申请失败，请确认域名解析和 80 端口可访问。"
+      error "证书申请失败。请确认域名已解析到本机、80 端口已放行，且没有被 CDN/防火墙拦截。"
     fi
     return 1
   }
@@ -1834,7 +1834,7 @@ issue_cert_for_domain() {
   load_email
 
   if [[ -z "${ACME_EMAIL:-}" ]]; then
-    error "未设置邮箱，无法自动申请证书。"
+    error "未设置邮箱，无法自动申请证书。请先在证书管理里设置邮箱。"
     return 1
   fi
 
@@ -1892,7 +1892,7 @@ issue_cert_for_domain() {
       [[ -n "$retry_after" ]] && warn "可重试时间（UTC）：$retry_after"
       warn "这是 CA 侧限制，不是你服务器或端口配置问题。"
     else
-      error "自动申请证书失败，请确认域名解析和 80 端口可访问。"
+      error "自动申请证书失败。请确认域名已解析到本机、80 端口已放行，且没有被 CDN/防火墙拦截。"
     fi
     return 1
   }
@@ -1965,7 +1965,7 @@ cert_list_action_menu() {
         return 0
         ;;
       0) return 0 ;;
-      *) warn "无效输入。"; pause ;;
+      *) warn "无效输入。请输入 0-3 之间的菜单编号。"; pause ;;
     esac
   done
 }
@@ -1983,7 +1983,7 @@ cert_list_menu() {
   )
 
   if [[ ${#certs[@]} -eq 0 ]]; then
-    warn "当前未发现已签发证书。"
+    warn "当前未发现已签发证书。你可以先去 [2) 申请证书]。"
     return 0
   fi
 
@@ -2007,7 +2007,7 @@ cert_list_menu() {
       return 0
     fi
     if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#certs[@]} )); then
-      warn "无效编号。"
+      warn "无效编号。请输入证书列表中存在的编号。"
       pause
       continue
     fi
@@ -2183,7 +2183,7 @@ enable_https_from_config_list() {
     return 0
   fi
   if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#confs[@]} )); then
-    error "无效序号。"
+    error "无效序号。请输入列表中存在的配置编号。"
     return 1
   fi
 
@@ -2198,7 +2198,7 @@ enable_https_from_config_list() {
       if disable_https_for_conf_file "$domain" "$conf_file"; then
         info "操作完成：HTTPS 已停用。"
       else
-        error "操作失败：停用 HTTPS 未成功。"
+        error "操作失败：停用 HTTPS 未成功。请检查 nginx -t 输出。"
       fi
     else
       info "已取消停用 HTTPS。"
@@ -2220,7 +2220,7 @@ enable_https_from_config_list() {
     fi
 
     if ! issue_cert_for_domain "$domain"; then
-      error "自动申请证书失败，无法继续启用 HTTPS。"
+      error "自动申请证书失败，无法继续启用 HTTPS。请先修复解析或 80 端口可达性后重试。"
       return 1
     fi
   fi
@@ -2253,7 +2253,7 @@ enable_https_for_domain_value() {
     done
     read -rp "选择序号: " idx
     if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#matches[@]} )); then
-      error "无效序号。"
+    error "无效序号。请输入列表中存在的配置编号。"
       return 1
     fi
     conf_file="${matches[$((idx-1))]}"
@@ -2445,7 +2445,7 @@ cert_menu() {
       3) cert_list_menu ;;
       4) run_menu_action enable_https_for_domain; pause ;;
       0) return 0 ;;
-      *) warn "无效输入。"; pause ;;
+      *) warn "无效输入。请输入 0-4 之间的菜单编号。"; pause ;;
     esac
   done
 }
@@ -2680,7 +2680,7 @@ realtime_info_menu() {
       1) show_nginx_realtime_status ;;
       2) show_traffic_stats ;;
       0) return 0 ;;
-      *) warn "无效输入。"; pause ;;
+      *) warn "无效输入。请输入 0-2 之间的菜单编号。"; pause ;;
     esac
   done
 }
@@ -2820,7 +2820,7 @@ uninstall_menu() {
       3) run_menu_action uninstall_acme_only; pause ;;
       4) run_menu_action uninstall_all; pause ;;
       0) return 0 ;;
-      *) warn "无效输入。"; pause ;;
+      *) warn "无效输入。请输入 0-4 之间的菜单编号。"; pause ;;
     esac
   done
 }
@@ -2857,7 +2857,7 @@ main() {
       4) realtime_info_menu ;;
       5) uninstall_menu ;;
       0) info "已退出 ${APP_NAME}。"; exit 0 ;;
-      *) warn "无效输入，请输入菜单编号。"; pause ;;
+      *) warn "无效输入，请输入主菜单中的编号（0-5）。"; pause ;;
     esac
   done
 }
