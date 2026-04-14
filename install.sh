@@ -24,12 +24,24 @@ install_git_if_needed() {
 
   echo "[INFO] 未检测到 git，正在安装..."
   if command -v apt-get >/dev/null 2>&1; then
-    ${SUDO} apt-get update
-    ${SUDO} apt-get install -y git
+    if ! ${SUDO} apt-get update; then
+      echo "[ERROR] apt-get update 失败。请检查网络连接、软件源状态或稍后重试。"
+      exit 1
+    fi
+    if ! ${SUDO} apt-get install -y git; then
+      echo "[ERROR] git 安装失败。请检查网络连接、软件源状态或稍后重试。"
+      exit 1
+    fi
   elif command -v dnf >/dev/null 2>&1; then
-    ${SUDO} dnf install -y git
+    if ! ${SUDO} dnf install -y git; then
+      echo "[ERROR] git 安装失败。请检查网络连接、软件源状态或稍后重试。"
+      exit 1
+    fi
   elif command -v yum >/dev/null 2>&1; then
-    ${SUDO} yum install -y git
+    if ! ${SUDO} yum install -y git; then
+      echo "[ERROR] git 安装失败。请检查网络连接、软件源状态或稍后重试。"
+      exit 1
+    fi
   else
     echo "[ERROR] 无法自动安装 git，请手动安装后重试。"
     exit 1
@@ -80,7 +92,10 @@ bootstrap_install() {
 
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     echo "[INFO] 检测到已安装目录，正在更新到最新版本..."
-    ${SUDO} git -C "$INSTALL_DIR" pull --ff-only
+    if ! ${SUDO} git -C "$INSTALL_DIR" pull --ff-only; then
+      echo "[ERROR] 拉取最新代码失败。请检查网络连接、GitHub 可达性，或稍后重试。"
+      exit 1
+    fi
   elif [[ -e "$INSTALL_DIR" ]]; then
     echo "[WARN] 目标目录已存在，但不是 Git 仓库：$INSTALL_DIR"
     if [[ -t 0 && -t 1 ]]; then
@@ -95,14 +110,23 @@ bootstrap_install() {
 
     ${SUDO} rm -rf "$INSTALL_DIR"
     echo "[INFO] 已清理旧目录，重新克隆仓库到 $INSTALL_DIR"
-    ${SUDO} git clone "$REPO_URL" "$INSTALL_DIR"
+    if ! ${SUDO} git clone "$REPO_URL" "$INSTALL_DIR"; then
+      echo "[ERROR] 克隆仓库失败。请检查网络连接、GitHub 可达性，或稍后重试。"
+      exit 1
+    fi
   else
     echo "[INFO] 克隆仓库到 $INSTALL_DIR"
-    ${SUDO} git clone "$REPO_URL" "$INSTALL_DIR"
+    if ! ${SUDO} git clone "$REPO_URL" "$INSTALL_DIR"; then
+      echo "[ERROR] 克隆仓库失败。请检查网络连接、GitHub 可达性，或稍后重试。"
+      exit 1
+    fi
   fi
 
   # 进入安装目录执行同一个 install.sh（仅安装，不在子进程里启动 nx）
-  ${SUDO} bash "$INSTALL_DIR/install.sh" --no-run
+  if ! ${SUDO} bash "$INSTALL_DIR/install.sh" --no-run; then
+    echo "[ERROR] 安装器执行失败。请根据上面的输出检查具体报错。"
+    exit 1
+  fi
 
   if [[ -t 0 && -t 1 ]]; then
     read -rp "是否立即启动 Nginx-X？[y/N]: " run_now

@@ -217,21 +217,39 @@ install_nginx_official() {
 
   case "$pkg" in
     apt)
-      ${SUDO} apt-get update
-      ${SUDO} apt-get install -y curl wget socat cron gpg lsb-release ca-certificates
+      if ! ${SUDO} apt-get update; then
+        error "依赖索引刷新失败。请检查网络连接、APT 源状态或稍后重试。"
+        return 1
+      fi
+      if ! ${SUDO} apt-get install -y curl wget socat cron gpg lsb-release ca-certificates; then
+        error "依赖安装失败。请检查网络连接、APT 源状态或稍后重试。"
+        return 1
+      fi
 
       note "配置 Nginx 官方 stable 源..."
-      curl -fsSL https://nginx.org/keys/nginx_signing.key | ${SUDO} gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg
+      if ! curl -fsSL https://nginx.org/keys/nginx_signing.key | ${SUDO} gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg; then
+        error "下载或导入 Nginx 官方签名密钥失败。请检查网络连接后重试。"
+        return 1
+      fi
       echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/$(. /etc/os-release; echo ${ID}) $(lsb_release -cs) nginx" | ${SUDO} tee /etc/apt/sources.list.d/nginx.list >/dev/null
-      ${SUDO} apt-get update
-      ${SUDO} apt-get install -y nginx
+      if ! ${SUDO} apt-get update; then
+        error "Nginx 官方源刷新失败。请检查网络连接、软件源配置或稍后重试。"
+        return 1
+      fi
+      if ! ${SUDO} apt-get install -y nginx; then
+        error "Nginx 安装失败。请检查网络连接、软件源状态或稍后重试。"
+        return 1
+      fi
       ;;
     dnf|yum)
       if [[ "$os_id" != "centos" && "$os_id" != "rhel" && "$os_id" != "rocky" && "$os_id" != "almalinux" ]]; then
         warn "当前系统 ID=$os_id，仍尝试按 RHEL 系列方式安装。"
       fi
       ${SUDO} "$pkg" install -y epel-release || true
-      ${SUDO} "$pkg" install -y curl wget socat cronie
+      if ! ${SUDO} "$pkg" install -y curl wget socat cronie; then
+        error "依赖安装失败。请检查网络连接、YUM/DNF 源状态或稍后重试。"
+        return 1
+      fi
 
       note "配置 Nginx 官方 stable 源..."
       cat <<'REPO' | ${SUDO} tee /etc/yum.repos.d/nginx.repo >/dev/null
@@ -244,7 +262,10 @@ gpgkey=https://nginx.org/keys/nginx_signing.key
 module_hotfixes=true
 REPO
       ${SUDO} "$pkg" makecache -y || true
-      ${SUDO} "$pkg" install -y nginx
+      if ! ${SUDO} "$pkg" install -y nginx; then
+        error "Nginx 安装失败。请检查网络连接、软件源状态或稍后重试。"
+        return 1
+      fi
       ;;
     *)
       error "不支持的包管理器，无法自动安装。"
