@@ -411,6 +411,21 @@ valid_port() {
   [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= 65535 ))
 }
 
+valid_url() {
+  # 验证 URL 格式并拒绝可能注入 nginx 配置的危险字符
+  local url="$1"
+  [[ "$url" =~ ^https?:// ]] || return 1
+  [[ ${#url} -gt 2048 ]] && return 1
+  [[ "$url" == *$'\n'* || "$url" == *$'\r'* ]] && return 1
+  [[ "$url" == *'{'* ]] && return 1
+  [[ "$url" == *'}'* ]] && return 1
+  [[ "$url" == *\\* ]] && return 1
+  [[ "$url" == *';'* ]] && return 1
+  [[ "$url" == *"'"* ]] && return 1
+  [[ "$url" == *'`'* ]] && return 1
+  return 0
+}
+
 is_port_used_os() {
   local p="$1"
   ss -lnt "( sport = :${p} )" 2>/dev/null | awk 'NR>1{print}' | grep -q .
@@ -995,8 +1010,8 @@ add_external_url_proxy() {
   create_port="$listen_port"
 
   read -rp "请输入外部上游 URL（http/https）: " upstream_url
-  if [[ ! "$upstream_url" =~ ^https?:// ]]; then
-    error "上游 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://example.com。"
+  if ! valid_url "$upstream_url"; then
+    error "上游 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符（{}\\;）。"
     return 1
   fi
 
@@ -1004,15 +1019,15 @@ add_external_url_proxy() {
 
   if [[ "$external_mode" =~ ^emby_ ]]; then
     read -rp "请输入推流节点 URL（http/https）: " stream_upstream_url
-    if [[ ! "$stream_upstream_url" =~ ^https?:// ]]; then
-      error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://stream.example.com。"
+    if ! valid_url "$stream_upstream_url"; then
+      error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
       return 1
     fi
 
     read -rp "请输入源站公开 URL（用于重定向/替换，默认与主上游相同）: " source_site_url
     [[ -z "$source_site_url" ]] && source_site_url="$upstream_url"
-    if [[ ! "$source_site_url" =~ ^https?:// ]]; then
-      error "源站公开 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://emby.example.com。"
+    if ! valid_url "$source_site_url"; then
+      error "源站公开 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
       return 1
     fi
 
@@ -1333,8 +1348,8 @@ modify_external_conf() {
 
   read -rp "新的主上游 URL（当前 ${current_upstream_url}）: " new_upstream_url
   [[ -z "$new_upstream_url" ]] && new_upstream_url="$current_upstream_url"
-  if [[ ! "$new_upstream_url" =~ ^https?:// ]]; then
-    error "主上游 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://example.com。"
+  if ! valid_url "$new_upstream_url"; then
+    error "主上游 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
     return 1
   fi
 
@@ -1348,16 +1363,16 @@ modify_external_conf() {
   if [[ "$new_mode" =~ ^emby_ ]]; then
     read -rp "新的推流节点 URL（当前 ${current_stream_upstream_url:-未设置}）: " input_stream
     [[ -n "$input_stream" ]] && new_stream_upstream_url="$input_stream"
-    if [[ ! "$new_stream_upstream_url" =~ ^https?:// ]]; then
-      error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://stream.example.com。"
+    if ! valid_url "$new_stream_upstream_url"; then
+      error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
       return 1
     fi
 
     read -rp "新的源站公开 URL（当前 ${current_source_site_url:-$new_upstream_url}）: " input_source
     [[ -n "$input_source" ]] && new_source_site_url="$input_source"
     [[ -z "$new_source_site_url" ]] && new_source_site_url="$new_upstream_url"
-    if [[ ! "$new_source_site_url" =~ ^https?:// ]]; then
-      error "源站公开 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://emby.example.com。"
+    if ! valid_url "$new_source_site_url"; then
+      error "源站公开 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
       return 1
     fi
 
