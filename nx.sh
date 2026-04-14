@@ -340,7 +340,23 @@ install_or_upgrade_nginx() {
 # ---------- 反向代理配置通用 ----------
 valid_domain() {
   local d="$1"
-  [[ "$d" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
+  local IFS=.
+  local -a labels
+  local label
+
+  [[ "$d" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+  [[ "$d" == *.* ]] || return 1
+  [[ "$d" != .* && "$d" != *. && "$d" != *..* ]] || return 1
+
+  read -r -a labels <<< "$d"
+  [[ ${#labels[@]} -ge 2 ]] || return 1
+
+  for label in "${labels[@]}"; do
+    [[ -n "$label" ]] || return 1
+    [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
+  done
+
+  [[ "${labels[-1]}" =~ ^[A-Za-z]{2,63}$ ]]
 }
 
 valid_ipv4_host() {
@@ -1022,8 +1038,24 @@ add_external_url_proxy() {
 }
 
 # ---------- 功能4：配置列表管理 ----------
+list_managed_conf_files() {
+  local include_disabled="${1:-0}"
+
+  if [[ "$include_disabled" == "1" ]]; then
+    find "$CONF_DIR" -maxdepth 1 -type f \( -name '*.conf' -o -name '*.conf.*' \) \
+      ! -name 'nginx_status.conf' \
+      ! -name 'acme-challenge-*.conf' \
+      -exec grep -l '^# managed_by=Nginx-X$' {} + 2>/dev/null | sort || true
+  else
+    find "$CONF_DIR" -maxdepth 1 -type f -name '*.conf' \
+      ! -name 'nginx_status.conf' \
+      ! -name 'acme-challenge-*.conf' \
+      -exec grep -l '^# managed_by=Nginx-X$' {} + 2>/dev/null | sort || true
+  fi
+}
+
 list_all_conf_files() {
-  find "$CONF_DIR" -maxdepth 1 -type f \( -name '*.conf' -o -name '*.conf.*' \) -printf '%f\n' 2>/dev/null | sort || true
+  list_managed_conf_files 1 | xargs -r -n1 basename
 }
 
 print_conf_list() {
@@ -1031,8 +1063,8 @@ print_conf_list() {
   local -a enabled_files disabled_files
 
   # 二级列表：先显示已启用（.conf），再显示已停用（.bak/其他后缀）
-  mapfile -t enabled_files < <(find "$CONF_DIR" -maxdepth 1 -type f -name '*.conf' -printf '%f\n' 2>/dev/null | sort || true)
-  mapfile -t disabled_files < <(find "$CONF_DIR" -maxdepth 1 -type f -name '*.conf.*' -printf '%f\n' 2>/dev/null | sort || true)
+  mapfile -t enabled_files < <(list_managed_conf_files 0 | xargs -r -n1 basename)
+  mapfile -t disabled_files < <(list_managed_conf_files 1 | xargs -r -n1 basename | grep -E '\.conf\..+$' || true)
 
   FILES=("${enabled_files[@]}" "${disabled_files[@]}")
 
@@ -2211,7 +2243,7 @@ site_health_menu() {
     case "$c" in
       1)
         clear
-        mapfile -t confs < <(find "${CONF_DIR}" -maxdepth 1 -type f -name '*.conf' ! -name 'nginx_status.conf' 2>/dev/null | sort || true)
+        mapfile -t confs < <(list_managed_conf_files 0)
         if [[ ${#confs[@]} -eq 0 ]]; then
           warn "当前没有可检查的站点配置。请先创建站点。"
           pause
@@ -2235,7 +2267,7 @@ site_health_menu() {
         ;;
       2)
         clear
-        mapfile -t confs < <(find "${CONF_DIR}" -maxdepth 1 -type f -name '*.conf' ! -name 'nginx_status.conf' 2>/dev/null | sort || true)
+        mapfile -t confs < <(list_managed_conf_files 0)
         if [[ ${#confs[@]} -eq 0 ]]; then
           warn "当前没有可检查的站点配置。请先创建站点。"
           pause
@@ -2383,7 +2415,7 @@ enable_https_from_config_list() {
   local -a confs
   local idx conf_file domain
 
-  mapfile -t confs < <(find "${CONF_DIR}" -maxdepth 1 -type f -name '*.conf' 2>/dev/null | sort || true)
+  mapfile -t confs < <(list_managed_conf_files 0)
   if [[ ${#confs[@]} -eq 0 ]]; then
     warn "未找到可启用 HTTPS 的配置文件。"
     return 1
@@ -2844,7 +2876,7 @@ TX速率: ${tx_rate} MB/s
 当前启用配置流量（最近5000日志，优先按 Host 专用日志统计）
 EOF
 
-    mapfile -t enabled_confs < <(find "${CONF_DIR}" -maxdepth 1 -type f -name '*.conf' 2>/dev/null | sort || true)
+    mapfile -t enabled_confs < <(list_managed_conf_files 0)
     if [[ ${#enabled_confs[@]} -eq 0 ]]; then
       echo "- 无启用配置"
     else
