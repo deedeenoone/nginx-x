@@ -430,7 +430,7 @@ conf_target_path() {
 conf_meta_get() {
   local conf_file="$1"
   local key="$2"
-  grep -E "^# ${key}=" "$conf_file" 2>/dev/null | head -n1 | sed "s/^# ${key}=//"
+  grep -E "^# ${key}=" "$conf_file" 2>/dev/null | head -n1 | sed "s/^# ${key}=//" || true
 }
 
 url_host() {
@@ -2392,10 +2392,10 @@ disable_https_for_conf_file() {
     return 1
   fi
 
-  listen_port="$(grep -E '^# listen_port=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# listen_port=//')"
+  listen_port="$(conf_meta_get "$conf_file" listen_port)"
   [[ -z "$listen_port" ]] && listen_port="80"
 
-  stream_mode="$(grep -E '^# stream_mode=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# stream_mode=//')"
+  stream_mode="$(conf_meta_get "$conf_file" stream_mode)"
   stream_block=""
   if [[ "$stream_mode" == "media" ]]; then
     stream_block=$(cat <<'BLOCK'
@@ -2583,7 +2583,7 @@ enable_https_for_conf_file() {
   local conf_file="$2"
   local force_port="${3:-}"
   local mode external_mode upstream_url stream_upstream_url source_site_url referer_url
-  local tmp listen_port redirect_suffix stream_mode stream_block
+  local tmp listen_port redirect_suffix stream_mode stream_block effective_https_port
 
   if [[ ! -f "$conf_file" ]]; then
     error "配置文件不存在：${conf_file}"
@@ -2596,9 +2596,14 @@ enable_https_for_conf_file() {
   fi
 
   # 优先读取配置注释中的监听端口，缺失时回退 443
-  listen_port="$(grep -E '^# listen_port=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# listen_port=//')"
+  listen_port="$(conf_meta_get "$conf_file" listen_port)"
   [[ -n "$force_port" ]] && listen_port="$force_port"
   [[ -z "$listen_port" ]] && listen_port="443"
+
+  effective_https_port="$listen_port"
+  if [[ "$effective_https_port" == "80" ]]; then
+    effective_https_port="443"
+  fi
 
   mode="$(conf_meta_get "$conf_file" mode)"
   if [[ "$mode" == "external" ]]; then
@@ -2610,9 +2615,9 @@ enable_https_for_conf_file() {
     [[ -z "$external_mode" ]] && external_mode="normal"
 
     tmp="$(mktemp /tmp/nginxx-https-"${domain}".XXXXXX.conf)"
-    build_external_proxy_conf "$domain" "$listen_port" "$upstream_url" "$external_mode" "$tmp" "1" "$stream_upstream_url" "$source_site_url" "$referer_url"
+    build_external_proxy_conf "$domain" "$effective_https_port" "$upstream_url" "$external_mode" "$tmp" "1" "$stream_upstream_url" "$source_site_url" "$referer_url"
     if apply_conf_with_rollback "$tmp" "$conf_file"; then
-      info "HTTPS 已启用，且已配置 80 -> ${listen_port} 强制跳转。"
+      info "HTTPS 已启用，且已配置 80 -> ${effective_https_port} 强制跳转。"
       rm -f "$tmp"
       return 0
     fi
@@ -2621,13 +2626,13 @@ enable_https_for_conf_file() {
     return 1
   fi
 
-  if [[ "$listen_port" == "443" ]]; then
+  if [[ "$effective_https_port" == "443" ]]; then
     redirect_suffix=""
   else
-    redirect_suffix=":${listen_port}"
+    redirect_suffix=":${effective_https_port}"
   fi
 
-  stream_mode="$(grep -E '^# stream_mode=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# stream_mode=//')"
+  stream_mode="$(conf_meta_get "$conf_file" stream_mode)"
   stream_block=""
   if [[ "$stream_mode" == "media" ]]; then
     stream_block=$(cat <<'BLOCK'
@@ -2647,8 +2652,8 @@ BLOCK
 
   # 复用原配置上游：优先读取注释元数据，避免同端口多域名场景误取到错误上游
   local existing_upstream host_header ssl_sni_line backend_port_meta upstream_url_meta
-  upstream_url_meta="$(grep -E '^# upstream_url=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# upstream_url=//')"
-  backend_port_meta="$(grep -E '^# backend_port=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# backend_port=//')"
+  upstream_url_meta="$(conf_meta_get "$conf_file" upstream_url)"
+  backend_port_meta="$(conf_meta_get "$conf_file" backend_port)"
 
   if [[ -n "$upstream_url_meta" ]]; then
     existing_upstream="$upstream_url_meta"
@@ -2675,12 +2680,12 @@ BLOCK
     fi
   fi
 
-  # 生成 HTTPS 配置：继承原监听端口（支持非标端口，如 7777）
+  # 生成 HTTPS 配置：若原配置监听 80，则自动切到标准 443，避免 80 同时承担重定向与 SSL 监听
   cat > "$tmp" <<EOF
 # managed_by=Nginx-X
 # domain=${domain}
 # https_enabled=true
-# listen_port=${listen_port}
+# listen_port=${effective_https_port}
 # stream_mode=${stream_mode:-normal}
 
 server {
@@ -2698,7 +2703,7 @@ server {
 }
 
 server {
-    listen ${listen_port} ssl;
+    listen ${effective_https_port} ssl;
     http2 on;
     server_name ${domain};
 
@@ -2729,7 +2734,7 @@ ${ssl_sni_line}
 EOF
 
   if apply_conf_with_rollback "$tmp" "$conf_file"; then
-    info "HTTPS 已启用，且已配置 80 -> ${listen_port} 强制跳转。"
+    info "HTTPS 已启用，且已配置 80 -> ${effective_https_port} 强制跳转。"
     rm -f "$tmp"
     return 0
   fi
