@@ -24,9 +24,10 @@ EOF
 chmod +x "$MOCK_BIN/nginx" "$MOCK_BIN/systemctl"
 export PATH="$MOCK_BIN:$PATH"
 
-# shellcheck disable=SC1091
+# shellcheck disable=SC1091,SC1090
 source <(sed '$d' nx.sh)
 
+# shellcheck disable=SC2034
 SUDO=""
 CONF_DIR="$TMPDIR_ROOT/conf.d"
 SSL_DIR="$TMPDIR_ROOT/ssl"
@@ -45,6 +46,7 @@ build_external_proxy_conf \
 
 grep -q '^# https_enabled=true$' "$out"
 grep -q 'listen 443 ssl;' "$out"
+# shellcheck disable=SC2016
 grep -Fq 'return 301 https://$host$request_uri;' "$out"
 grep -q "ssl_certificate     ${SSL_DIR}/example.com/fullchain.pem;" "$out"
 grep -q "ssl_certificate_key ${SSL_DIR}/example.com/privkey.pem;" "$out"
@@ -67,6 +69,7 @@ EOF
 enable_https_for_conf_file "example.com" "$http_conf"
 grep -q '^# listen_port=443$' "$http_conf"
 grep -q 'listen 443 ssl;' "$http_conf"
+# shellcheck disable=SC2016
 grep -Fq 'return 301 https://$host$request_uri;' "$http_conf"
 
 bad_conf="$TMPDIR_ROOT/bad.conf"

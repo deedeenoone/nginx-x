@@ -108,7 +108,7 @@ bash install.sh
 - 证书签发当前只覆盖 `HTTP-01` 场景，不支持 DNS API 自动签发通配符证书。
 - 若服务器前面有 CDN、四层转发、NAT 回环限制，HTTP-01 自检可能出现“软失败但实际可签发”或“本机通过但公网不通”的差异，需要结合实际网络环境判断。
 - 流量统计默认是轻量实现。若未配置 `/var/log/nginx/access.host.log`，统计结果属于估算值，不适合作为精准计费依据。
-- 当前没有完整的端到端自动化测试，仓库内提供的是基础语法检查与 ShellCheck CI。
+- 当前没有完整的端到端自动化测试，仓库内提供的是基础语法检查、ShellCheck，以及 HTTPS 配置回归脚本。
 
 ## 交互与失败处理说明
 
@@ -135,13 +135,15 @@ access_log /var/log/nginx/access.host.log nginxx_host;
 - `bash -n nx.sh`
 - `bash -n install.sh`
 - `shellcheck -x nx.sh install.sh`
+- `bash tests/https_config_regression.sh`
 
 本地也可以直接运行：
 
 ```bash
 bash -n nx.sh
 bash -n install.sh
-shellcheck -x nx.sh install.sh
+shellcheck -x nx.sh install.sh tests/https_config_regression.sh
+bash tests/https_config_regression.sh
 ```
 
 ## 交互规范

@@ -147,6 +147,7 @@ disable_default_conf_if_exists() {
 
 detect_os_id() {
   if [[ -f /etc/os-release ]]; then
+    # shellcheck disable=SC1091
     . /etc/os-release
     echo "${ID:-unknown}"
   else
@@ -231,7 +232,8 @@ install_nginx_official() {
         error "下载或导入 Nginx 官方签名密钥失败。请检查网络连接后重试。"
         return 1
       fi
-      echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/$(. /etc/os-release; echo ${ID}) $(lsb_release -cs) nginx" | ${SUDO} tee /etc/apt/sources.list.d/nginx.list >/dev/null
+      # shellcheck disable=SC1091
+      echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/$(. /etc/os-release; echo "${ID}") $(lsb_release -cs) nginx" | ${SUDO} tee /etc/apt/sources.list.d/nginx.list >/dev/null
       if ! ${SUDO} apt-get update; then
         error "Nginx 官方源刷新失败。请检查网络连接、软件源配置或稍后重试。"
         return 1
@@ -416,6 +418,7 @@ valid_url() {
   local url="$1"
   [[ "$url" =~ ^https?:// ]] || return 1
   [[ ${#url} -gt 2048 ]] && return 1
+  [[ "$url" =~ [[:space:]] ]] && return 1
   [[ "$url" == *$'\n'* || "$url" == *$'\r'* ]] && return 1
   [[ "$url" == *'{'* ]] && return 1
   [[ "$url" == *'}'* ]] && return 1
@@ -2244,7 +2247,7 @@ health_check_conf_file() {
   elif [[ "$scheme" == "https" && "$verify_result" != "0" ]]; then
     status_label="证书校验失败"
     status_ok=2
-  elif [[ "$http_code" =~ ^401|403|404$ ]]; then
+  elif [[ "$http_code" =~ ^(401|403|404)$ ]]; then
     status_label="可访问但需确认"
     status_ok=1
   else
