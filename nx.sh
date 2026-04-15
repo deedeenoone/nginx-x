@@ -50,12 +50,19 @@ confirm() {
 }
 
 run_menu_action() {
+  # In long-running interactive shells, bash may cache command paths.
+  # After uninstalling packages (e.g. nginx), the cached path can point to a deleted binary.
+  # Refresh hash table before each menu action so check_cmd / execution are accurate.
+  hash -r 2>/dev/null || true
   "$@" || true
 }
 
 # ---------- 基础能力 ----------
 check_cmd() {
-  command -v "$1" >/dev/null 2>&1
+  # Avoid false positives from bash's command hash cache (set -u friendly).
+  local p
+  p="$(command -v "$1" 2>/dev/null || true)"
+  [[ -n "$p" && -x "$p" ]]
 }
 
 require_nginx_installed() {
@@ -172,7 +179,7 @@ nginx_local_version() {
     echo ""
     return
   fi
-  nginx -v 2>&1 | sed -E 's#^nginx version: nginx/##'
+  nginx -v 2>&1 | sed -E 's#^nginx version: nginx/##' || echo ""
 }
 
 nginx_latest_version_online() {
