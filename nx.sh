@@ -177,8 +177,22 @@ nginx_local_version() {
 
 nginx_latest_version_online() {
   # 使用 Nginx 官网下载页中的 stable 区块获取最新稳定版版本号
-  local latest
-  latest="$(curl -fsSL https://nginx.org/en/download.html | awk '
+  # 说明：部分环境可能无法访问 nginx.org（网络/IPv6/DNS/证书链等）。
+  # 该函数失败时应返回空字符串，由上层决定回退策略。
+  local latest page
+
+  page="$(curl -fsSL --connect-timeout 4 --max-time 8 \
+    -A 'Nginx-X version-check' \
+    https://nginx.org/en/download.html 2>/dev/null || true)"
+
+  # fallback: try http if https fails (some environments have TLS issues)
+  if [[ -z "$page" ]]; then
+    page="$(curl -fsSL --connect-timeout 4 --max-time 8 \
+      -A 'Nginx-X version-check' \
+      http://nginx.org/en/download.html 2>/dev/null || true)"
+  fi
+
+  latest="$(printf '%s' "$page" | awk '
     /Stable version/ {in_stable=1; next}
     in_stable && /Mainline version/ {in_stable=0}
     in_stable {
@@ -188,6 +202,7 @@ nginx_latest_version_online() {
       }
     }
   ' | sort -V | tail -n1 || true)"
+
   echo "$latest"
 }
 
@@ -315,17 +330,19 @@ upgrade_nginx_smart() {
   note "本地版本：${local_ver}"
   if [[ "$using_official_repo" == "1" ]]; then
     if [[ -z "$latest_ver" ]]; then
-      warn "无法获取官方最新版本，建议稍后重试。"
-      return 1
-    fi
-    note "官方最新：${latest_ver}"
+      warn "无法获取官方最新版本（nginx.org 访问失败或解析失败），将改为直接通过包管理器检查并尝试升级。"
+      using_official_repo="0"
+    else
+      note "官方最新：${latest_ver}"
 
-    if ! version_gt "$latest_ver" "$local_ver"; then
-      info "当前已是最新版本，无需升级。"
-      return 0
+      if ! version_gt "$latest_ver" "$local_ver"; then
+        info "当前已是最新版本，无需升级。"
+        return 0
+      fi
     fi
-  else
-    warn "当前未检测到 nginx 官方源（nginx.org），将按系统仓库执行升级检查。"
+  fi
+  if [[ "$using_official_repo" != "1" ]]; then
+    warn "当前未检测到或无法使用 nginx 官方源（nginx.org），将按系统仓库执行升级检查。"
   fi
 
   backup_dir="/etc/nginx-backup-$(date +%F-%H%M%S)"
