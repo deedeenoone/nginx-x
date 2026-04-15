@@ -221,6 +221,43 @@ curl_error_hint() {
   esac
 }
 
+pkg_upgrade_error_hint() {
+  # Provide short, actionable hints for common package manager failures.
+  # Input: package manager name + output text
+  local pkg="${1:-}"
+  local out="${2:-}"
+
+  case "$pkg" in
+    apt)
+      if echo "$out" | grep -qiE 'Could not resolve|Temporary failure in name resolution'; then
+        echo "APT 网络/DNS 异常：请检查 DNS、网络连通性或是否被墙。"
+      elif echo "$out" | grep -qiE 'Could not get lock|Unable to acquire the dpkg frontend lock|dpkg was interrupted'; then
+        echo "APT 被锁或中断：可能有其它 apt/dpkg 进程在运行，或需要先执行 dpkg --configure -a。"
+      elif echo "$out" | grep -qiE 'Held broken packages|held packages'; then
+        echo "存在被 hold 的包：可尝试 apt-mark showhold 查看并处理，或手动解决依赖冲突。"
+      elif echo "$out" | grep -qiE 'Release file|The repository .* does not have a Release file'; then
+        echo "APT 源异常：可能源地址不对、系统版本不匹配或镜像不可用。"
+      else
+        echo "APT 升级失败：请检查上方输出（网络/源/依赖）。"
+      fi
+      ;;
+    yum|dnf)
+      if echo "$out" | grep -qiE 'Could not resolve host|Name or service not known'; then
+        echo "YUM/DNF 网络/DNS 异常：请检查 DNS、网络连通性。"
+      elif echo "$out" | grep -qiE 'repomd\.xml|Cannot download repodata|Failed to download metadata'; then
+        echo "YUM/DNF 元数据下载失败：可能仓库不可达或被拦截，稍后重试或更换源。"
+      elif echo "$out" | grep -qiE 'GPG key retrieval failed|Public key for|NOKEY|gpgcheck'; then
+        echo "YUM/DNF GPG 校验失败：请检查仓库 GPG key 是否可下载、系统时间是否正确。"
+      else
+        echo "YUM/DNF 升级失败：请检查上方输出（网络/源/GPG）。"
+      fi
+      ;;
+    *)
+      echo "升级失败：请检查上方输出。"
+      ;;
+  esac
+}
+
 escape_ere() {
   printf '%s' "$1" | sed -e 's/[][\\.^$*+?(){}|/]/\\&/g'
 }
@@ -379,11 +416,26 @@ upgrade_nginx_smart() {
   esac
   case "$pkg" in
     apt)
-      ${SUDO} apt-get update
-      ${SUDO} apt-get install -y --only-upgrade nginx
+      local apt_out=""
+      if ! ${SUDO} apt-get update; then
+        error "APT 索引刷新失败。"
+        return 1
+      fi
+      apt_out="$(${SUDO} apt-get install -y --only-upgrade nginx 2>&1)" || {
+        error "APT 升级失败。"
+        warn "$(pkg_upgrade_error_hint apt "$apt_out")"
+        echo "$apt_out"
+        return 1
+      }
       ;;
     dnf|yum)
-      ${SUDO} "$pkg" update -y nginx
+      local pm_out=""
+      pm_out="$(${SUDO} "$pkg" update -y nginx 2>&1)" || {
+        error "${pkg} 升级失败。"
+        warn "$(pkg_upgrade_error_hint "$pkg" "$pm_out")"
+        echo "$pm_out"
+        return 1
+      }
       ;;
     *)
       error "不支持的包管理器，无法自动升级。"
@@ -1796,12 +1848,21 @@ ensure_acme_location_for_domain_conf() {
   # Primary: match our metadata line "# domain=<domain>"
   mapfile -t matches < <(awk -v d="$domain" 'FNR==1{found=0} $0=="# domain=" d {found=1} ENDFILE{if(found) print FILENAME}' "${CONF_DIR}"/*.conf 2>/dev/null || true)
 
-  # Fallback: match server_name containing the domain (best-effort, avoids missing metadata)
+  # Fallback: match server_name token containing the domain (best-effort, avoids missing metadata)
   if [[ ${#matches[@]} -eq 0 ]]; then
     mapfile -t matches < <(awk -v d="$domain" '
       BEGIN{in_server=0; hasDomain=0}
       /server\s*\{/ {in_server=1; hasDomain=0}
-      in_server && index($0, "server_name") && index($0, d) {hasDomain=1}
+      in_server && index($0, "server_name") {
+        # Exact token match: server_name a b c;
+        line=$0
+        sub(/.*server_name[[:space:]]+/, "", line)
+        gsub(/;/, "", line)
+        n=split(line, a, /[[:space:]]+/)
+        for (i=1; i<=n; i++) {
+          if (a[i] == d) {hasDomain=1}
+        }
+      }
       in_server && /}/ {
         if (hasDomain) {print FILENAME; nextfile}
         in_server=0
