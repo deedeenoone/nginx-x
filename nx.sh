@@ -1300,6 +1300,7 @@ modify_conf() {
   fi
 
   tmp="$(mktemp /tmp/nginxx-mod-"${new_domain}".XXXXXX.conf)"
+  trap 'rm -f "$tmp"' RETURN
   build_proxy_conf "$new_domain" "$new_listen" "$new_backend" "$tmp"
 
   # 修改后默认写入 .conf；也可选择立即停用
@@ -1443,6 +1444,7 @@ modify_external_conf() {
 
   new_target="$(conf_target_path "$new_domain" "$desired_port")"
   tmp="$(mktemp /tmp/nginxx-external-mod-"${new_domain}".XXXXXX.conf)"
+  trap 'rm -f "$tmp"' RETURN
   build_external_proxy_conf "$new_domain" "$create_port" "$new_upstream_url" "$new_mode" "$tmp" "0" "$new_stream_upstream_url" "$new_source_site_url" "$new_referer_url"
 
   if apply_conf_with_rollback "$tmp" "$new_target"; then
@@ -1813,6 +1815,7 @@ ensure_http_challenge_server() {
 
   local tmp_challenge
   tmp_challenge="$(mktemp /tmp/.acme-challenge-"${domain}".XXXXXX.conf)"
+  trap 'rm -f "$tmp_challenge"' RETURN
 
   cat > "$tmp_challenge" <<EOF
 server {
@@ -2358,6 +2361,7 @@ disable_https_for_conf_file() {
     [[ -z "$external_mode" ]] && external_mode="normal"
 
     tmp="$(mktemp /tmp/nginxx-disable-https-"${domain}".XXXXXX.conf)"
+    trap 'rm -f "$tmp"' RETURN
     build_external_proxy_conf "$domain" "$listen_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url"
     if apply_conf_with_rollback "$tmp" "$conf_file"; then
       info "HTTPS 已停用：$(basename "$conf_file")"
@@ -2406,6 +2410,7 @@ BLOCK
   fi
 
   tmp="$(mktemp /tmp/nginxx-disable-https-"${domain}".XXXXXX.conf)"
+  trap 'rm -f "$tmp"' RETURN
   cat > "$tmp" <<EOF
 # managed_by=Nginx-X
 # domain=${domain}
@@ -2592,6 +2597,7 @@ enable_https_for_conf_file() {
     [[ -z "$external_mode" ]] && external_mode="normal"
 
     tmp="$(mktemp /tmp/nginxx-https-"${domain}".XXXXXX.conf)"
+    trap 'rm -f "$tmp"' RETURN
     build_external_proxy_conf "$domain" "$effective_https_port" "$upstream_url" "$external_mode" "$tmp" "1" "$stream_upstream_url" "$source_site_url" "$referer_url"
     if apply_conf_with_rollback "$tmp" "$conf_file"; then
       info "HTTPS 已启用，且已配置 80 -> ${effective_https_port} 强制跳转。"
@@ -2626,6 +2632,7 @@ BLOCK
   fi
 
   tmp="$(mktemp /tmp/nginxx-https-"${domain}".XXXXXX.conf)"
+  trap 'rm -f "$tmp"' RETURN
 
   # 复用原配置上游：优先读取注释元数据，避免同端口多域名场景误取到错误上游
   local existing_upstream host_header ssl_sni_line backend_port_meta upstream_url_meta
@@ -2757,6 +2764,7 @@ ensure_status_endpoint() {
 
   local tmp_status
   tmp_status="$(mktemp /tmp/nginxx-status.XXXXXX.conf)"
+  trap 'rm -f "$tmp_status"' RETURN
 
   cat > "$tmp_status" <<'EOF'
 server {
