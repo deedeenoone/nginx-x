@@ -353,6 +353,14 @@ upgrade_nginx_smart() {
   pkg="$(detect_pkg_mgr)"
   case "$pkg" in
     apt)
+      note "将执行：apt-get install -y --only-upgrade nginx"
+      ;;
+    dnf|yum)
+      note "将执行：${pkg} update -y nginx"
+      ;;
+  esac
+  case "$pkg" in
+    apt)
       ${SUDO} apt-get update
       ${SUDO} apt-get install -y --only-upgrade nginx
       ;;
