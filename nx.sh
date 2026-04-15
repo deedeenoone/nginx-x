@@ -206,6 +206,21 @@ nginx_latest_version_online() {
   echo "$latest"
 }
 
+curl_error_hint() {
+  # Translate common curl failures into short hints for end users.
+  # Input: curl exit code
+  local rc="${1:-0}"
+  case "$rc" in
+    6)  echo "DNS 解析失败（无法解析域名）" ;;
+    7)  echo "连接失败（可能被防火墙阻断或端口不可达）" ;;
+    28) echo "连接超时（网络不通或链路较慢）" ;;
+    35) echo "TLS 握手失败（证书链/协议问题）" ;;
+    52) echo "服务器无响应（连接被中断）" ;;
+    56) echo "网络接收失败（连接被重置）" ;;
+    *)  echo "未知错误（curl rc=${rc}）" ;;
+  esac
+}
+
 escape_ere() {
   printf '%s' "$1" | sed -e 's/[][\\.^$*+?(){}|/]/\\&/g'
 }
@@ -330,7 +345,10 @@ upgrade_nginx_smart() {
   note "本地版本：${local_ver}"
   if [[ "$using_official_repo" == "1" ]]; then
     if [[ -z "$latest_ver" ]]; then
-      warn "无法获取官方最新版本（nginx.org 访问失败或解析失败），将改为直接通过包管理器检查并尝试升级。"
+      # Try a quick curl probe to classify failure (best-effort)
+      local probe_rc=0
+      curl -fsSL --connect-timeout 4 --max-time 8 -A 'Nginx-X version-check' https://nginx.org/en/download.html >/dev/null 2>&1 || probe_rc=$?
+      warn "无法获取官方最新版本（nginx.org 访问失败或解析失败：$(curl_error_hint "$probe_rc")），将改为直接通过包管理器检查并尝试升级。"
       using_official_repo="0"
     else
       note "官方最新：${latest_ver}"
@@ -1775,7 +1793,21 @@ ensure_acme_location_for_domain_conf() {
   local -a tmp_files=()
   trap 'for f in "${tmp_files[@]}"; do rm -f "$f" 2>/dev/null || true; done' RETURN
 
+  # Primary: match our metadata line "# domain=<domain>"
   mapfile -t matches < <(awk -v d="$domain" 'FNR==1{found=0} $0=="# domain=" d {found=1} ENDFILE{if(found) print FILENAME}' "${CONF_DIR}"/*.conf 2>/dev/null || true)
+
+  # Fallback: match server_name containing the domain (best-effort, avoids missing metadata)
+  if [[ ${#matches[@]} -eq 0 ]]; then
+    mapfile -t matches < <(awk -v d="$domain" '
+      BEGIN{in_server=0; hasDomain=0}
+      /server\s*\{/ {in_server=1; hasDomain=0}
+      in_server && index($0, "server_name") && index($0, d) {hasDomain=1}
+      in_server && /}/ {
+        if (hasDomain) {print FILENAME; nextfile}
+        in_server=0
+      }
+    ' "${CONF_DIR}"/*.conf 2>/dev/null || true)
+  fi
   [[ ${#matches[@]} -gt 0 ]] || return 0
 
   for conf_file in "${matches[@]}"; do
