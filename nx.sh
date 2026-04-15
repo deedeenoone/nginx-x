@@ -3126,11 +3126,15 @@ uninstall_script_only() {
   # 2) 清理脚本目录下运行状态文件
   rm -f "$EMAIL_CONF" 2>/dev/null || true
 
-  # 3) 给出手动删除路径，避免后台自删失败难排查
+  # 3) 给出手动删除路径（仅当不在系统通用 bin 目录），避免误导用户去清理 /usr/local/bin
   local dir_to_remove
   dir_to_remove="$(realpath "$SCRIPT_DIR")"
   if [[ -n "$dir_to_remove" && "$dir_to_remove" != "/" ]]; then
-    warn "脚本目录未自动删除，请按需手动清理：${dir_to_remove}"
+    if [[ "$dir_to_remove" == "/usr/local/bin" || "$dir_to_remove" == "/usr/local/bin/"* ]]; then
+      :
+    else
+      warn "脚本目录未自动删除，请按需手动清理：${dir_to_remove}"
+    fi
   fi
 
   info "本脚本卸载完成。"
@@ -3173,8 +3177,20 @@ uninstall_nginx_only() {
       ;;
   esac
 
-  ${SUDO} rm -rf /etc/nginx /var/log/nginx /var/cache/nginx /usr/share/nginx 2>/dev/null || true
-  info "Nginx 及其配置已清理完成。"
+  ${SUDO} rm -rf /etc/nginx /var/log/nginx /var/cache/nginx /usr/share/nginx/html /usr/share/nginx 2>/dev/null || true
+
+  # Double-check if any core dirs still exist (best-effort)
+  local -a leftovers=()
+  for p in /etc/nginx /var/log/nginx /var/cache/nginx /usr/share/nginx; do
+    if [[ -e "$p" ]]; then
+      leftovers+=("$p")
+    fi
+  done
+  if [[ ${#leftovers[@]} -gt 0 ]]; then
+    warn "已尝试清理 Nginx 目录，但仍检测到残留：${leftovers[*]}（可能被其他程序占用或权限限制）"
+  else
+    info "Nginx 及其配置已清理完成。"
+  fi
 }
 
 uninstall_acme_only() {
