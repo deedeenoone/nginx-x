@@ -248,7 +248,7 @@ install_nginx_official() {
         return 1
       fi
       # shellcheck disable=SC1091
-      echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/$(. /etc/os-release; echo "${ID}") $(lsb_release -cs) nginx" | ${SUDO} tee /etc/apt/sources.list.d/nginx.list >/dev/null
+      echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/$(. /etc/os-release; echo "${ID}") $(lsb_release -cs) nginx" | ${SUDO} tee /etc/apt/sources.list.d/nginx.list >/dev/null
       if ! ${SUDO} apt-get update; then
         error "Nginx 官方源刷新失败。请检查网络连接、软件源配置或稍后重试。"
         return 1
@@ -272,7 +272,7 @@ install_nginx_official() {
       cat <<'REPO' | ${SUDO} tee /etc/yum.repos.d/nginx.repo >/dev/null
 [nginx-stable]
 name=nginx stable repo
-baseurl=http://nginx.org/packages/centos/$releasever/$basearch/
+baseurl=https://nginx.org/packages/centos/$releasever/$basearch/
 gpgcheck=1
 enabled=1
 gpgkey=https://nginx.org/keys/nginx_signing.key
@@ -343,6 +343,7 @@ upgrade_nginx_smart() {
   fi
   if [[ "$using_official_repo" != "1" ]]; then
     warn "当前未检测到或无法使用 nginx 官方源（nginx.org），将按系统仓库执行升级检查。"
+    note "将执行包管理器升级检查（无新版本不会升级）。"
   fi
 
   backup_dir="/etc/nginx-backup-$(date +%F-%H%M%S)"
@@ -1762,6 +1763,10 @@ ensure_acme_location_for_domain_conf() {
   local -a matches
   local conf_file tmp_file
 
+  # Collect tmp files so early-return / errors won't leak /tmp files
+  local -a tmp_files=()
+  trap 'for f in "${tmp_files[@]}"; do rm -f "$f" 2>/dev/null || true; done' RETURN
+
   mapfile -t matches < <(awk -v d="$domain" 'FNR==1{found=0} $0=="# domain=" d {found=1} ENDFILE{if(found) print FILENAME}' "${CONF_DIR}"/*.conf 2>/dev/null || true)
   [[ ${#matches[@]} -gt 0 ]] || return 0
 
@@ -1771,6 +1776,7 @@ ensure_acme_location_for_domain_conf() {
     fi
 
     tmp_file="$(mktemp /tmp/nginxx-acme-loc-"${domain}".XXXXXX.conf)"
+    tmp_files+=("$tmp_file")
     awk '
       BEGIN{inserted=0}
       {
