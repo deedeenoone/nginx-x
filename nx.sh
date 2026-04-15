@@ -300,7 +300,9 @@ upgrade_nginx_smart() {
 
   # 仅在检测到 nginx 官方源时，才按官网版本做对比，避免 Debian/Ubuntu 默认源误判
   local using_official_repo="0"
-  if [[ -f /etc/apt/sources.list.d/nginx.list ]] || [[ -f /etc/yum.repos.d/nginx.repo ]]; then
+  if grep -rqsF 'nginx.org' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+    using_official_repo="1"
+  elif [[ -f /etc/yum.repos.d/nginx.repo ]] || grep -rqsF 'nginx.org' /etc/yum.repos.d/ 2>/dev/null; then
     using_official_repo="1"
   fi
 
@@ -368,6 +370,7 @@ install_or_upgrade_nginx() {
 # ---------- 反向代理配置通用 ----------
 valid_domain() {
   local d="$1"
+  # NOTE: local IFS is scoped to this function and restored on return
   local IFS=.
   local -a labels
   local label
@@ -389,6 +392,7 @@ valid_domain() {
 
 valid_ipv4_host() {
   local ip="$1"
+  # NOTE: local IFS is scoped to this function and restored on return
   local IFS=.
   local -a octets
 
@@ -939,6 +943,7 @@ add_reverse_proxy() {
 
   target="$(conf_target_path "$domain" "$desired_port")"
   tmp="$(mktemp /tmp/nginxx-"${domain}".XXXXXX.conf)"
+  trap 'rm -f "$tmp"' RETURN
 
   build_proxy_conf "$domain" "$create_port" "$backend_port" "$tmp"
   if apply_conf_with_rollback "$tmp" "$target"; then
@@ -1067,6 +1072,7 @@ add_external_url_proxy() {
 
   target="$(conf_target_path "$domain" "$desired_port")"
   tmp="$(mktemp /tmp/nginxx-external-"${domain}".XXXXXX.conf)"
+  trap 'rm -f "$tmp"' RETURN
 
   build_external_proxy_conf "$domain" "$create_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url"
   if apply_conf_with_rollback "$tmp" "$target"; then
@@ -1772,16 +1778,13 @@ ensure_http_challenge_server() {
   # 为“非80端口业务配置”补一个临时 80 验证入口，保证 HTTP-01 可达
   local domain="$1"
   local challenge_conf="${CONF_DIR}/acme-challenge-${domain}.conf"
-  local domain_ere
-
-  domain_ere="$(escape_ere "$domain")"
 
   # 检测是否已存在“同域名 + 80监听”的配置
-  if awk -v d="$domain_ere" '
+  if awk -v d="$domain" '
     BEGIN{in_server=0; has80=0; hasDomain=0}
     /server\s*\{/ {in_server=1; has80=0; hasDomain=0}
     in_server && /listen[[:space:]]+80([[:space:]]|;)/ {has80=1}
-    in_server && $0 ~ "server_name[[:space:]]+" d "([[:space:]]|;)" {hasDomain=1}
+    in_server && index($0, "server_name") && index($0, d) {hasDomain=1}
     in_server && /}/ {
       if (has80 && hasDomain) {print "yes"; exit 0}
       in_server=0
@@ -1876,7 +1879,7 @@ precheck_http01() {
 }
 
 issue_cert() {
-  local domain challenge_conf
+  local domain
   load_email
 
   if [[ -z "${ACME_EMAIL:-}" ]]; then
@@ -1889,6 +1892,27 @@ issue_cert() {
     error "域名格式不合法。请输入可签发证书的域名，例如 example.com。"
     return 1
   fi
+
+  _issue_cert_impl "$domain"
+}
+
+issue_cert_for_domain() {
+  # 参数：域名；用于"添加反向代理后自动申请证书"场景
+  local domain="$1"
+  load_email
+
+  if [[ -z "${ACME_EMAIL:-}" ]]; then
+    error "未设置邮箱，无法自动申请证书。请先在证书管理里设置邮箱。"
+    return 1
+  fi
+
+  _issue_cert_impl "$domain"
+}
+
+_issue_cert_impl() {
+  # 内部共享实现：签发证书（被 issue_cert 和 issue_cert_for_domain 调用）
+  local domain="$1"
+  local challenge_conf
 
   ensure_acme_location_for_domain_conf "$domain"
   challenge_conf="$(ensure_http_challenge_server "$domain")"
@@ -1940,7 +1964,7 @@ issue_cert() {
 
     if echo "$issue_output" | grep -qi 'rateLimited\|too many certificates'; then
       retry_after="$(echo "$issue_output" | sed -n 's/.*retry after \([^:]*UTC\).*/\1/p' | head -n1)"
-      error "证书申请失败：触发 Let\'s Encrypt 频率限制（429）。"
+      error "证书申请失败：触发 Let's Encrypt 频率限制（429）。"
       [[ -n "$retry_after" ]] && warn "可重试时间（UTC）：$retry_after"
       warn "这是 CA 侧限制，不是你服务器或端口配置问题。"
     else
@@ -1959,88 +1983,6 @@ issue_cert() {
 
   ensure_acme_cron
   info "证书申请并安装成功。"
-}
-
-issue_cert_for_domain() {
-  # 参数：域名；用于“添加反向代理后自动申请证书”场景
-  local domain="$1"
-  local challenge_conf
-  load_email
-
-  if [[ -z "${ACME_EMAIL:-}" ]]; then
-    error "未设置邮箱，无法自动申请证书。请先在证书管理里设置邮箱。"
-    return 1
-  fi
-
-  ensure_acme_location_for_domain_conf "$domain"
-  challenge_conf="$(ensure_http_challenge_server "$domain")"
-
-  # 确保挑战配置已生效
-  if ! reload_nginx_safe; then
-    cleanup_http_challenge_server "$challenge_conf"
-    error "证书申请前校验失败：Nginx 配置未生效。"
-    return 1
-  fi
-
-  local pre_rc=0
-  if precheck_http01 "$domain"; then
-    pre_rc=0
-  else
-    pre_rc=$?
-  fi
-  if (( pre_rc != 0 )); then
-    if [[ $pre_rc -eq 10 ]]; then
-      if ! confirm "自检存在风险，是否仍继续申请证书？"; then
-        cleanup_http_challenge_server "$challenge_conf"
-        reload_nginx_safe || true
-        info "已取消申请。"
-        return 1
-      fi
-      warn "你选择继续申请，将直接尝试签发。"
-    else
-      if ! confirm "自检失败（建议先修复），是否仍强制继续申请？"; then
-        cleanup_http_challenge_server "$challenge_conf"
-        reload_nginx_safe || true
-        info "已取消申请。"
-        return 1
-      fi
-      warn "你选择强制继续申请。"
-    fi
-  fi
-
-  ensure_acme_installed || return 1
-
-  note "开始为 ${domain} 自动申请证书（HTTP 验证）..."
-  "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
-  "$HOME/.acme.sh/acme.sh" --register-account -m "$ACME_EMAIL" >/dev/null 2>&1 || true
-
-  local issue_output retry_after
-  issue_output="$("$HOME/.acme.sh/acme.sh" --issue -d "$domain" --webroot /usr/share/nginx/html 2>&1)" || {
-    echo "$issue_output"
-    cleanup_http_challenge_server "$challenge_conf"
-    reload_nginx_safe || true
-
-    if echo "$issue_output" | grep -qi 'rateLimited\|too many certificates'; then
-      retry_after="$(echo "$issue_output" | sed -n 's/.*retry after \([^:]*UTC\).*/\1/p' | head -n1)"
-      error "自动申请证书失败：触发 Let\'s Encrypt 频率限制（429）。"
-      [[ -n "$retry_after" ]] && warn "可重试时间（UTC）：$retry_after"
-      warn "这是 CA 侧限制，不是你服务器或端口配置问题。"
-    else
-      error "自动申请证书失败。请确认域名已解析到本机、80 端口已放行，且没有被 CDN/防火墙拦截。"
-    fi
-    return 1
-  }
-
-  cleanup_http_challenge_server "$challenge_conf"
-  reload_nginx_safe || true
-
-  ${SUDO} mkdir -p "${SSL_DIR}/${domain}"
-  "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
-    --key-file "${SSL_DIR}/${domain}/privkey.pem" \
-    --fullchain-file "${SSL_DIR}/${domain}/fullchain.pem"
-
-  ensure_acme_cron
-  info "证书申请并安装成功。已开启自动续期任务。"
 }
 
 cert_list_action_menu() {
@@ -2234,7 +2176,7 @@ health_check_conf_file() {
 
   if [[ "$scheme" == "https" ]]; then
     # shellcheck disable=SC2016
-    tls_days="$(timeout 8s bash -lc 'echo | openssl s_client -servername "$0" -connect "$0:$1" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null' "$domain" "$listen_port" | sed 's/notAfter=//' | xargs -I{} date -d '{}' +%s 2>/dev/null | awk -v now="$(date +%s)" '{if($1>0) printf "%d", int(($1-now)/86400); else print "-"}' || true)"
+    tls_days="$(timeout 8s bash -c 'echo | openssl s_client -servername "$0" -connect "$0:$1" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null' "$domain" "$listen_port" | sed 's/notAfter=//' | xargs -I{} date -d '{}' +%s 2>/dev/null | awk -v now="$(date +%s)" '{if($1>0) printf "%d", int(($1-now)/86400); else print "-"}' || true)"
     [[ -z "$tls_days" ]] && tls_days="-"
   else
     tls_days="-"
@@ -2867,8 +2809,9 @@ show_nginx_realtime_status() {
       start_time="N/A"
     fi
 
-    rx="$(awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$3} END{print s+0}' /proc/net/dev 2>/dev/null)"
-    tx="$(awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$11} END{print s+0}' /proc/net/dev 2>/dev/null)"
+    # Strip leading whitespace so $1 is always the interface name
+    rx="$(sed 's/^[[:space:]]*//' /proc/net/dev 2>/dev/null | awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$2} END{print s+0}')"
+    tx="$(sed 's/^[[:space:]]*//' /proc/net/dev 2>/dev/null | awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$10} END{print s+0}')"
 
     if [[ $initialized -eq 1 ]]; then
       rx_rate="$(awk -v d=$((rx-prev_rx)) 'BEGIN{if(d<0)d=0; printf "%.1f", d/1024/1024}')"
@@ -2933,8 +2876,9 @@ show_traffic_stats() {
 
   while true; do
     local rx tx rx_rate tx_rate rx_total_mb tx_total_mb
-    rx="$(awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$3} END{print s+0}' /proc/net/dev 2>/dev/null)"
-    tx="$(awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$11} END{print s+0}' /proc/net/dev 2>/dev/null)"
+    # Strip leading whitespace so $1 is always the interface name
+    rx="$(sed 's/^[[:space:]]*//' /proc/net/dev 2>/dev/null | awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$2} END{print s+0}')"
+    tx="$(sed 's/^[[:space:]]*//' /proc/net/dev 2>/dev/null | awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$10} END{print s+0}')"
 
     if [[ $initialized -eq 1 ]]; then
       rx_rate="$(awk -v d=$((rx-prev_rx)) 'BEGIN{if(d<0)d=0; printf "%.2f", d/1024/1024}')"
@@ -2977,8 +2921,8 @@ EOF
           req_count="$(tail -n 5000 "$host_log_file" 2>/dev/null | awk -v d="$domain" '$1==d {c++} END{print c+0}')"
           bytes_sum="$(tail -n 5000 "$host_log_file" 2>/dev/null | awk -v d="$domain" '$1==d && $2 ~ /^[0-9]+$/ {s+=$2} END{print s+0}')"
         elif [[ -f "$log_file" && -n "$domain" ]]; then
-          req_count="$( (tail -n 5000 "$log_file" 2>/dev/null | grep -F -c "$domain") || true )"
-          bytes_sum="$( (tail -n 5000 "$log_file" 2>/dev/null | grep -F "$domain" | awk '{if($10 ~ /^[0-9]+$/) s+=$10} END{print s+0}') || true )"
+          req_count="$(tail -n 5000 "$log_file" 2>/dev/null | grep -F -c "$domain" || true)"
+          bytes_sum="$(tail -n 5000 "$log_file" 2>/dev/null | grep -F "$domain" | awk '{if($10 ~ /^[0-9]+$/) s+=$10} END{print s+0}' || true)"
         else
           req_count="0"
           bytes_sum="0"
