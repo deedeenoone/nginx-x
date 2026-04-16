@@ -2511,11 +2511,11 @@ BLOCK
 
   if [[ "$existing_upstream" =~ ^https?://127\.0\.0\.1(:[0-9]+)?(/|$) ]]; then
     # shellcheck disable=SC2016
-    host_header='\$host'
+    host_header='$host'
     ssl_sni_line=''
   else
     # shellcheck disable=SC2016
-    host_header='\$proxy_host'
+    host_header='$proxy_host'
     if [[ "$existing_upstream" =~ ^https:// ]]; then
       ssl_sni_line='        proxy_ssl_server_name on;'
     else
@@ -2766,11 +2766,11 @@ BLOCK
   # 外部上游（尤其 https）需要 SNI 与上游 Host，避免 502/握手失败
   if [[ "$existing_upstream" =~ ^https?://127\.0\.0\.1(:[0-9]+)?(/|$) ]]; then
     # shellcheck disable=SC2016
-    host_header='\$host'
+    host_header='$host'
     ssl_sni_line=''
   else
     # shellcheck disable=SC2016
-    host_header='\$proxy_host'
+    host_header='$proxy_host'
     if [[ "$existing_upstream" =~ ^https:// ]]; then
       ssl_sni_line='        proxy_ssl_server_name on;'
     else
