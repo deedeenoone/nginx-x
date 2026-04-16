@@ -1714,6 +1714,17 @@ config_manage_menu() {
 # 扫描目录，返回未被 Nginx-X 管理的 .conf 文件（去重）
 _scan_unmanaged_confs() {
   local -A seen
+  # 预建已纳管域名-端口索引（含停用的 .bak 等），用于去重
+  local -A managed_index
+  local _f _d _p
+  for _f in "${CONF_DIR}"/*.conf "${CONF_DIR}"/*.conf.*; do
+    [[ -f "$_f" ]] || continue
+    grep -q '^# managed_by=Nginx-X$' "$_f" 2>/dev/null || continue
+    _d="$(grep -oP '^# domain=\K.+' "$_f" 2>/dev/null | head -1)"
+    _p="$(grep -oP '^# listen_port=\K.+' "$_f" 2>/dev/null | head -1)"
+    [[ -n "$_d" ]] && managed_index["${_d}|${_p:-80}"]=1
+  done
+
   local dirs=(
     "$CONF_DIR"
     "/etc/nginx/sites-enabled"
@@ -1736,6 +1747,12 @@ _scan_unmanaged_confs() {
       real_path="$(realpath "$conf" 2>/dev/null || echo "$conf")"
       [[ -n "${seen[$real_path]:-}" ]] && continue
       seen["$real_path"]="$conf"
+      # 检查是否已有同域名-端口的纳管配置（包括停用的）
+      local _cd _cp
+      _cd="$(awk '/^[[:space:]]*server[[:space:]]*\{/{s=1} s && /server_name/{gsub(/;/,""); print $2; exit}' "$conf")"
+      _cp="$(awk '/^[[:space:]]*server[[:space:]]*\{/{s=1} s && /^[[:space:]]*listen[[:space:]]/{gsub(/;/,""); for(i=2;i<=NF;i++){if($i~/^[0-9]+$/){print $i; exit}}}' "$conf")"
+      [[ -z "$_cp" ]] && _cp="80"
+      [[ -n "$_cd" && -n "${managed_index["${_cd}|${_cp}"]:-}" ]] && continue
       echo "$conf"
     done
   done
