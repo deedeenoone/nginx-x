@@ -465,6 +465,7 @@ install_or_upgrade_nginx() {
   # 未安装时先安装；已安装时走智能升级逻辑
   if ! check_cmd nginx; then
     install_nginx_official
+    auto_import_after_install
   else
     upgrade_nginx_smart
   fi
@@ -1708,6 +1709,208 @@ config_manage_menu() {
   done
 }
 
+# ---------- 导入已有 nginx 配置 ----------
+
+# 扫描目录，返回未被 Nginx-X 管理的 .conf 文件（去重）
+_scan_unmanaged_confs() {
+  local -A seen
+  local dirs=(
+    "$CONF_DIR"
+    "/etc/nginx/sites-enabled"
+    "/etc/nginx/sites-available"
+  )
+  local dir conf real_path
+
+  for dir in "${dirs[@]}"; do
+    [[ -d "$dir" ]] || continue
+    for conf in "$dir"/*.conf "$dir"/*; do
+      [[ -f "$conf" ]] || continue
+      # 只处理看起来像 nginx 配置的文件（含 server 块）
+      grep -qE '^[[:space:]]*server[[:space:]]*\{' "$conf" 2>/dev/null || continue
+      # 跳过已纳管的
+      grep -q '^# managed_by=Nginx-X$' "$conf" 2>/dev/null && continue
+      # 跳过 nginx 默认/状态配置
+      local base; base="$(basename "$conf")"
+      [[ "$base" == "default" || "$base" == "default.conf" || "$base" == "nginx_status.conf" ]] && continue
+      # 通过 realpath 去重（sites-enabled 软链接 → sites-available）
+      real_path="$(realpath "$conf" 2>/dev/null || echo "$conf")"
+      [[ -n "${seen[$real_path]:-}" ]] && continue
+      seen["$real_path"]="$conf"
+      echo "$conf"
+    done
+  done
+}
+
+# 从现有 conf 中提取元数据
+_extract_conf_meta() {
+  local conf="$1"
+  local domain listen_port backend_url https_enabled="false" mode=""
+
+  # 提取 server_name（取第一个 server 块里的第一个 token）
+  domain="$(awk '/^[[:space:]]*server[[:space:]]*\{/{in_srv=1} in_srv && /server_name/{gsub(/;/,""); print $2; exit}' "$conf")"
+  [[ -z "$domain" || "$domain" == "_" || "$domain" == "localhost" ]] && domain=""
+
+  # 提取 listen 端口（优先取带 ssl 的，否则第一个数字）
+  listen_port="$(awk '/^[[:space:]]*server[[:space:]]*\{/{in_srv=1} in_srv && /^[[:space:]]*listen[[:space:]]/{gsub(/;/,""); for(i=2;i<=NF;i++){if($i~/^[0-9]+$/){print $i; exit}}}' "$conf")"
+  [[ -z "$listen_port" ]] && listen_port="80"
+
+  # 提取 proxy_pass
+  backend_url="$(grep -oP 'proxy_pass\s+\K[^;]+' "$conf" | head -1)"
+
+  # 检测 HTTPS
+  if grep -qE '^[[:space:]]*ssl_certificate[[:space:]]+' "$conf" 2>/dev/null; then
+    https_enabled="true"
+  fi
+
+  # 检测是否为外部反代（proxy_pass 不是 127.0.0.1/localhost）
+  if [[ -n "$backend_url" ]] && ! echo "$backend_url" | grep -qE '127\.0\.0\.1|localhost'; then
+    mode="external"
+  fi
+
+  echo "$domain|$listen_port|$backend_url|$https_enabled|$mode"
+}
+
+import_single_conf() {
+  local conf="$1"
+  local meta domain listen_port backend_url https_enabled mode
+  local target_name target_path tmp
+
+  meta="$(_extract_conf_meta "$conf")"
+  IFS='|' read -r domain listen_port backend_url https_enabled mode <<< "$meta"
+
+  if [[ -z "$domain" ]]; then
+    warn "跳过 ${conf}：无法识别 server_name。"
+    return 1
+  fi
+
+  # 目标文件名
+  target_name="${domain}-${listen_port}.conf"
+  target_path="${CONF_DIR}/${target_name}"
+
+  # 构建元数据头
+  local meta_header
+  meta_header="# managed_by=Nginx-X"
+  meta_header+=$'\n'
+  meta_header+="# domain=${domain}"
+  meta_header+=$'\n'
+  meta_header+="# listen_port=${listen_port}"
+  if [[ -n "$backend_url" ]]; then
+    local backend_port
+    backend_port="$(echo "$backend_url" | grep -oP ':\K[0-9]+(?=/?$)' || true)"
+    if [[ -n "$backend_port" ]]; then
+      meta_header+=$'\n'
+      meta_header+="# backend_port=${backend_port}"
+    fi
+    if [[ "$mode" == "external" ]]; then
+      meta_header+=$'\n'
+      meta_header+="# mode=external"
+      meta_header+=$'\n'
+      meta_header+="# upstream_url=${backend_url}"
+    fi
+  fi
+  if [[ "$https_enabled" == "true" ]]; then
+    meta_header+=$'\n'
+    meta_header+="# https_enabled=true"
+  fi
+  meta_header+=$'\n'
+
+  # 生成新配置（元数据头 + 原始内容）
+  tmp="$(mktemp /tmp/nginxx-import.XXXXXX.conf)"
+  {
+    echo "$meta_header"
+    cat "$conf"
+  } > "$tmp"
+
+  local real_conf
+  real_conf="$(realpath "$conf" 2>/dev/null || echo "$conf")"
+
+  if [[ "$real_conf" == "${CONF_DIR}/"* ]]; then
+    # 原文件就在 conf.d 里，直接原地加元数据头
+    ${SUDO} cp -a "$tmp" "$real_conf"
+    # 如果文件名不符合 domain-port.conf 规范，重命名
+    if [[ "$(basename "$real_conf")" != "$target_name" && ! -f "$target_path" ]]; then
+      ${SUDO} mv "$real_conf" "$target_path"
+    fi
+  else
+    # 来自 sites-available / sites-enabled，复制到 conf.d
+    ${SUDO} cp -a "$tmp" "$target_path"
+
+    # 移除 sites-enabled 中对应的软链接（避免重复加载）
+    local enabled_link
+    for enabled_link in /etc/nginx/sites-enabled/*; do
+      [[ -L "$enabled_link" ]] || continue
+      local link_target
+      link_target="$(realpath "$enabled_link" 2>/dev/null || true)"
+      if [[ "$link_target" == "$real_conf" ]]; then
+        ${SUDO} rm -f "$enabled_link"
+        info "已移除 sites-enabled 软链接：$(basename "$enabled_link")"
+      fi
+    done
+    note "原始文件保留在：${real_conf}"
+  fi
+
+  rm -f "$tmp"
+  info "已导入：${domain} (${listen_port}) → ${target_path}"
+  return 0
+}
+
+import_existing_confs() {
+  local -a unmanaged
+  mapfile -t unmanaged < <(_scan_unmanaged_confs)
+
+  if [[ ${#unmanaged[@]} -eq 0 ]]; then
+    info "未发现需要导入的已有配置。"
+    return 0
+  fi
+
+  echo ""
+  info "发现 ${#unmanaged[@]} 个未纳管的 Nginx 配置："
+  echo ""
+
+  local conf meta domain listen_port rest imported=0
+  for conf in "${unmanaged[@]}"; do
+    meta="$(_extract_conf_meta "$conf")"
+    IFS='|' read -r domain listen_port rest <<< "$meta"
+    [[ -z "$domain" ]] && domain="(无法识别)"
+
+    echo "  → ${conf}"
+    echo "    域名: ${domain}  端口: ${listen_port}"
+    if confirm "    是否导入此配置？"; then
+      if import_single_conf "$conf"; then
+        ((imported++))
+      fi
+    else
+      info "    已跳过。"
+    fi
+    echo ""
+  done
+
+  if [[ $imported -gt 0 ]]; then
+    info "共导入 ${imported} 个配置。"
+    # 验证整体配置
+    if ${SUDO} nginx -t 2>&1; then
+      reload_nginx_safe
+    else
+      warn "导入后 nginx -t 测试未通过，请检查配置。"
+    fi
+  fi
+}
+
+# 安装完成后自动检测并提示导入
+auto_import_after_install() {
+  local -a unmanaged
+  mapfile -t unmanaged < <(_scan_unmanaged_confs)
+  [[ ${#unmanaged[@]} -eq 0 ]] && return 0
+
+  echo ""
+  info "检测到 ${#unmanaged[@]} 个已有的 Nginx 配置尚未纳入管理。"
+  if confirm "是否立即导入到 Nginx-X？"; then
+    import_existing_confs
+  else
+    info "已跳过。你可以稍后在 [配置管理 → 导入已有配置] 中手动导入。"
+  fi
+}
+
 config_entry_menu() {
   while true; do
     clear
@@ -1715,6 +1918,7 @@ config_entry_menu() {
     echo "1) 添加配置"
     echo "2) 外部反代"
     echo "3) 配置列表"
+    echo "4) 导入已有配置"
     echo "0) 返回上一级"
     echo "=============================="
     read -rp "请选择: " c
@@ -1723,8 +1927,9 @@ config_entry_menu() {
       1) run_menu_action add_reverse_proxy; pause ;;
       2) run_menu_action add_external_url_proxy; pause ;;
       3) config_manage_menu ;;
+      4) run_menu_action import_existing_confs; pause ;;
       0) return 0 ;;
-      *) warn "无效输入。请输入 0-3 之间的菜单编号。"; pause ;;
+      *) warn "无效输入。请输入 0-4 之间的菜单编号。"; pause ;;
     esac
   done
 }
