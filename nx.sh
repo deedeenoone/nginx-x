@@ -19,7 +19,8 @@ APP_VERSION="1.7.0"
 CONF_DIR="/etc/nginx/conf.d"
 SSL_DIR="/etc/nginx/ssl"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EMAIL_CONF="${SCRIPT_DIR}/.email.conf"
+STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nginxx"
+EMAIL_CONF="${STATE_DIR}/email.conf"
 
 SUDO=""
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -49,12 +50,19 @@ confirm() {
 }
 
 run_menu_action() {
+  # In long-running interactive shells, bash may cache command paths.
+  # After uninstalling packages (e.g. nginx), the cached path can point to a deleted binary.
+  # Refresh hash table before each menu action so check_cmd / execution are accurate.
+  hash -r 2>/dev/null || true
   "$@" || true
 }
 
 # ---------- 基础能力 ----------
 check_cmd() {
-  command -v "$1" >/dev/null 2>&1
+  # Avoid false positives from bash's command hash cache (set -u friendly).
+  local p
+  p="$(command -v "$1" 2>/dev/null || true)"
+  [[ -n "$p" && -x "$p" ]]
 }
 
 require_nginx_installed() {
@@ -130,6 +138,10 @@ ensure_dirs() {
   ${SUDO} mkdir -p "$SSL_DIR"
 }
 
+ensure_state_dir() {
+  mkdir -p "$STATE_DIR"
+}
+
 disable_default_conf_if_exists() {
   local default_conf="${CONF_DIR}/default.conf"
   local disabled_conf="${CONF_DIR}/default.conf.bak"
@@ -142,6 +154,7 @@ disable_default_conf_if_exists() {
 
 detect_os_id() {
   if [[ -f /etc/os-release ]]; then
+    # shellcheck disable=SC1091
     . /etc/os-release
     echo "${ID:-unknown}"
   else
@@ -166,14 +179,94 @@ nginx_local_version() {
     echo ""
     return
   fi
-  nginx -v 2>&1 | sed -E 's#^nginx version: nginx/##'
+  nginx -v 2>&1 | sed -E 's#^nginx version: nginx/##' || echo ""
 }
 
 nginx_latest_version_online() {
-  # 使用 Nginx 官网下载页获取最新稳定版版本号
-  local latest
-  latest="$(curl -fsSL https://nginx.org/en/download.html | grep -Eo 'nginx-[0-9]+\.[0-9]+\.[0-9]+' | sed 's/nginx-//' | sort -V | tail -n1 || true)"
+  # 使用 Nginx 官网下载页中的 stable 区块获取最新稳定版版本号
+  # 说明：部分环境可能无法访问 nginx.org（网络/IPv6/DNS/证书链等）。
+  # 该函数失败时应返回空字符串，由上层决定回退策略。
+  local latest page
+
+  page="$(curl -fsSL --connect-timeout 4 --max-time 8 \
+    -A 'Nginx-X version-check' \
+    https://nginx.org/en/download.html 2>/dev/null || true)"
+
+  # fallback: try http if https fails (some environments have TLS issues)
+  if [[ -z "$page" ]]; then
+    page="$(curl -fsSL --connect-timeout 4 --max-time 8 \
+      -A 'Nginx-X version-check' \
+      http://nginx.org/en/download.html 2>/dev/null || true)"
+  fi
+
+  latest="$(printf '%s' "$page" | awk '
+    /Stable version/ {in_stable=1; next}
+    in_stable && /Mainline version/ {in_stable=0}
+    in_stable {
+      while (match($0, /nginx-[0-9]+\.[0-9]+\.[0-9]+/)) {
+        print substr($0, RSTART + 6, RLENGTH - 6)
+        $0 = substr($0, RSTART + RLENGTH)
+      }
+    }
+  ' | sort -V | tail -n1 || true)"
+
   echo "$latest"
+}
+
+curl_error_hint() {
+  # Translate common curl failures into short hints for end users.
+  # Input: curl exit code
+  local rc="${1:-0}"
+  case "$rc" in
+    6)  echo "DNS 解析失败（无法解析域名）" ;;
+    7)  echo "连接失败（可能被防火墙阻断或端口不可达）" ;;
+    28) echo "连接超时（网络不通或链路较慢）" ;;
+    35) echo "TLS 握手失败（证书链/协议问题）" ;;
+    52) echo "服务器无响应（连接被中断）" ;;
+    56) echo "网络接收失败（连接被重置）" ;;
+    *)  echo "未知错误（curl rc=${rc}）" ;;
+  esac
+}
+
+pkg_upgrade_error_hint() {
+  # Provide short, actionable hints for common package manager failures.
+  # Input: package manager name + output text
+  local pkg="${1:-}"
+  local out="${2:-}"
+
+  case "$pkg" in
+    apt)
+      if echo "$out" | grep -qiE 'Could not resolve|Temporary failure in name resolution'; then
+        echo "APT 网络/DNS 异常：请检查 DNS、网络连通性或是否被墙。"
+      elif echo "$out" | grep -qiE 'Could not get lock|Unable to acquire the dpkg frontend lock|dpkg was interrupted'; then
+        echo "APT 被锁或中断：可能有其它 apt/dpkg 进程在运行，或需要先执行 dpkg --configure -a。"
+      elif echo "$out" | grep -qiE 'Held broken packages|held packages'; then
+        echo "存在被 hold 的包：可尝试 apt-mark showhold 查看并处理，或手动解决依赖冲突。"
+      elif echo "$out" | grep -qiE 'Release file|The repository .* does not have a Release file'; then
+        echo "APT 源异常：可能源地址不对、系统版本不匹配或镜像不可用。"
+      else
+        echo "APT 升级失败：请检查上方输出（网络/源/依赖）。"
+      fi
+      ;;
+    yum|dnf)
+      if echo "$out" | grep -qiE 'Could not resolve host|Name or service not known'; then
+        echo "YUM/DNF 网络/DNS 异常：请检查 DNS、网络连通性。"
+      elif echo "$out" | grep -qiE 'repomd\.xml|Cannot download repodata|Failed to download metadata'; then
+        echo "YUM/DNF 元数据下载失败：可能仓库不可达或被拦截，稍后重试或更换源。"
+      elif echo "$out" | grep -qiE 'GPG key retrieval failed|Public key for|NOKEY|gpgcheck'; then
+        echo "YUM/DNF GPG 校验失败：请检查仓库 GPG key 是否可下载、系统时间是否正确。"
+      else
+        echo "YUM/DNF 升级失败：请检查上方输出（网络/源/GPG）。"
+      fi
+      ;;
+    *)
+      echo "升级失败：请检查上方输出。"
+      ;;
+  esac
+}
+
+escape_ere() {
+  printf '%s' "$1" | sed -e 's/[][\\.^$*+?(){}|/]/\\&/g'
 }
 
 version_gt() {
@@ -199,34 +292,56 @@ install_nginx_official() {
 
   case "$pkg" in
     apt)
-      ${SUDO} apt-get update
-      ${SUDO} apt-get install -y curl wget socat cron gpg lsb-release ca-certificates
+      if ! ${SUDO} apt-get update; then
+        error "依赖索引刷新失败。请检查网络连接、APT 源状态或稍后重试。"
+        return 1
+      fi
+      if ! ${SUDO} apt-get install -y curl wget socat cron gpg lsb-release ca-certificates; then
+        error "依赖安装失败。请检查网络连接、APT 源状态或稍后重试。"
+        return 1
+      fi
 
       note "配置 Nginx 官方 stable 源..."
-      curl -fsSL https://nginx.org/keys/nginx_signing.key | ${SUDO} gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg
-      echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/$(. /etc/os-release; echo ${ID}) $(lsb_release -cs) nginx" | ${SUDO} tee /etc/apt/sources.list.d/nginx.list >/dev/null
-      ${SUDO} apt-get update
-      ${SUDO} apt-get install -y nginx
+      if ! curl -fsSL https://nginx.org/keys/nginx_signing.key | ${SUDO} gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg; then
+        error "下载或导入 Nginx 官方签名密钥失败。请检查网络连接后重试。"
+        return 1
+      fi
+      # shellcheck disable=SC1091
+      echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/$(. /etc/os-release; echo "${ID}") $(lsb_release -cs) nginx" | ${SUDO} tee /etc/apt/sources.list.d/nginx.list >/dev/null
+      if ! ${SUDO} apt-get update; then
+        error "Nginx 官方源刷新失败。请检查网络连接、软件源配置或稍后重试。"
+        return 1
+      fi
+      if ! ${SUDO} apt-get install -y nginx; then
+        error "Nginx 安装失败。请检查网络连接、软件源状态或稍后重试。"
+        return 1
+      fi
       ;;
     dnf|yum)
       if [[ "$os_id" != "centos" && "$os_id" != "rhel" && "$os_id" != "rocky" && "$os_id" != "almalinux" ]]; then
         warn "当前系统 ID=$os_id，仍尝试按 RHEL 系列方式安装。"
       fi
       ${SUDO} "$pkg" install -y epel-release || true
-      ${SUDO} "$pkg" install -y curl wget socat cronie
+      if ! ${SUDO} "$pkg" install -y curl wget socat cronie; then
+        error "依赖安装失败。请检查网络连接、YUM/DNF 源状态或稍后重试。"
+        return 1
+      fi
 
       note "配置 Nginx 官方 stable 源..."
       cat <<'REPO' | ${SUDO} tee /etc/yum.repos.d/nginx.repo >/dev/null
 [nginx-stable]
 name=nginx stable repo
-baseurl=http://nginx.org/packages/centos/$releasever/$basearch/
+baseurl=https://nginx.org/packages/centos/$releasever/$basearch/
 gpgcheck=1
 enabled=1
 gpgkey=https://nginx.org/keys/nginx_signing.key
 module_hotfixes=true
 REPO
       ${SUDO} "$pkg" makecache -y || true
-      ${SUDO} "$pkg" install -y nginx
+      if ! ${SUDO} "$pkg" install -y nginx; then
+        error "Nginx 安装失败。请检查网络连接、软件源状态或稍后重试。"
+        return 1
+      fi
       ;;
     *)
       error "不支持的包管理器，无法自动安装。"
@@ -259,7 +374,9 @@ upgrade_nginx_smart() {
 
   # 仅在检测到 nginx 官方源时，才按官网版本做对比，避免 Debian/Ubuntu 默认源误判
   local using_official_repo="0"
-  if [[ -f /etc/apt/sources.list.d/nginx.list ]] || [[ -f /etc/yum.repos.d/nginx.repo ]]; then
+  if grep -rqsF 'nginx.org' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+    using_official_repo="1"
+  elif [[ -f /etc/yum.repos.d/nginx.repo ]] || grep -rqsF 'nginx.org' /etc/yum.repos.d/ 2>/dev/null; then
     using_official_repo="1"
   fi
 
@@ -272,17 +389,23 @@ upgrade_nginx_smart() {
   note "本地版本：${local_ver}"
   if [[ "$using_official_repo" == "1" ]]; then
     if [[ -z "$latest_ver" ]]; then
-      warn "无法获取官方最新版本，建议稍后重试。"
-      return 1
-    fi
-    note "官方最新：${latest_ver}"
+      # Try a quick curl probe to classify failure (best-effort)
+      local probe_rc=0
+      curl -fsSL --connect-timeout 4 --max-time 8 -A 'Nginx-X version-check' https://nginx.org/en/download.html >/dev/null 2>&1 || probe_rc=$?
+      warn "无法获取官方最新版本（nginx.org 访问失败或解析失败：$(curl_error_hint "$probe_rc")），将改为直接通过包管理器检查并尝试升级。"
+      using_official_repo="0"
+    else
+      note "官方最新：${latest_ver}"
 
-    if ! version_gt "$latest_ver" "$local_ver"; then
-      info "当前已是最新版本，无需升级。"
-      return 0
+      if ! version_gt "$latest_ver" "$local_ver"; then
+        info "当前已是最新版本，无需升级。"
+        return 0
+      fi
     fi
-  else
-    warn "当前未检测到 nginx 官方源（nginx.org），将按系统仓库执行升级检查。"
+  fi
+  if [[ "$using_official_repo" != "1" ]]; then
+    warn "当前未检测到或无法使用 nginx 官方源（nginx.org），将按系统仓库执行升级检查。"
+    note "将执行包管理器升级检查（无新版本不会升级）。"
   fi
 
   backup_dir="/etc/nginx-backup-$(date +%F-%H%M%S)"
@@ -292,11 +415,34 @@ upgrade_nginx_smart() {
   pkg="$(detect_pkg_mgr)"
   case "$pkg" in
     apt)
-      ${SUDO} apt-get update
-      ${SUDO} apt-get install -y --only-upgrade nginx
+      note "将执行：apt-get install -y --only-upgrade nginx"
       ;;
     dnf|yum)
-      ${SUDO} "$pkg" update -y nginx
+      note "将执行：${pkg} update -y nginx"
+      ;;
+  esac
+  case "$pkg" in
+    apt)
+      local apt_out=""
+      if ! ${SUDO} apt-get update; then
+        error "APT 索引刷新失败。"
+        return 1
+      fi
+      apt_out="$(${SUDO} apt-get install -y --only-upgrade nginx 2>&1)" || {
+        error "APT 升级失败。"
+        warn "$(pkg_upgrade_error_hint apt "$apt_out")"
+        echo "$apt_out"
+        return 1
+      }
+      ;;
+    dnf|yum)
+      local pm_out=""
+      pm_out="$(${SUDO} "$pkg" update -y nginx 2>&1)" || {
+        error "${pkg} 升级失败。"
+        warn "$(pkg_upgrade_error_hint "$pkg" "$pm_out")"
+        echo "$pm_out"
+        return 1
+      }
       ;;
     *)
       error "不支持的包管理器，无法自动升级。"
@@ -327,11 +473,29 @@ install_or_upgrade_nginx() {
 # ---------- 反向代理配置通用 ----------
 valid_domain() {
   local d="$1"
-  [[ "$d" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
+  # NOTE: local IFS is scoped to this function and restored on return
+  local IFS=.
+  local -a labels
+  local label
+
+  [[ "$d" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+  [[ "$d" == *.* ]] || return 1
+  [[ "$d" != .* && "$d" != *. && "$d" != *..* ]] || return 1
+
+  read -r -a labels <<< "$d"
+  [[ ${#labels[@]} -ge 2 ]] || return 1
+
+  for label in "${labels[@]}"; do
+    [[ -n "$label" ]] || return 1
+    [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
+  done
+
+  [[ "${labels[-1]}" =~ ^[A-Za-z]{2,63}$ ]]
 }
 
 valid_ipv4_host() {
   local ip="$1"
+  # NOTE: local IFS is scoped to this function and restored on return
   local IFS=.
   local -a octets
 
@@ -356,6 +520,22 @@ valid_port() {
   [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= 65535 ))
 }
 
+valid_url() {
+  # 验证 URL 格式并拒绝可能注入 nginx 配置的危险字符
+  local url="$1"
+  [[ "$url" =~ ^https?:// ]] || return 1
+  [[ ${#url} -gt 2048 ]] && return 1
+  [[ "$url" =~ [[:space:]] ]] && return 1
+  [[ "$url" == *$'\n'* || "$url" == *$'\r'* ]] && return 1
+  [[ "$url" == *'{'* ]] && return 1
+  [[ "$url" == *'}'* ]] && return 1
+  [[ "$url" == *\\* ]] && return 1
+  [[ "$url" == *';'* ]] && return 1
+  [[ "$url" == *"'"* ]] && return 1
+  [[ "$url" == *'`'* ]] && return 1
+  return 0
+}
+
 is_port_used_os() {
   local p="$1"
   ss -lnt "( sport = :${p} )" 2>/dev/null | awk 'NR>1{print}' | grep -q .
@@ -375,7 +555,7 @@ conf_target_path() {
 conf_meta_get() {
   local conf_file="$1"
   local key="$2"
-  grep -E "^# ${key}=" "$conf_file" 2>/dev/null | head -n1 | sed "s/^# ${key}=//"
+  grep -E "^# ${key}=" "$conf_file" 2>/dev/null | head -n1 | sed "s/^# ${key}=//" || true
 }
 
 url_host() {
@@ -525,13 +705,26 @@ build_external_proxy_conf() {
   local main_header_block=""
   local stream_sni_block=""
   local redirect_suffix=""
-  local upstream_host stream_host
+  local upstream_host stream_host https_meta https_cert_block
 
   upstream_host="$(url_host "$upstream_url")"
   stream_host="$(url_host "$stream_upstream_url")"
 
   [[ -z "$source_site_url" ]] && source_site_url="$upstream_url"
   [[ -z "$referer_url" && -n "$source_site_url" ]] && referer_url="$(default_referer_from_url "$source_site_url")"
+
+  https_meta=""
+  https_cert_block=""
+  if [[ "$https_enabled" == "1" ]]; then
+    https_meta="# https_enabled=true"
+    https_cert_block=$(cat <<EOF
+    ssl_certificate     ${SSL_DIR}/${domain}/fullchain.pem;
+    ssl_certificate_key ${SSL_DIR}/${domain}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+EOF
+)
+  fi
 
   case "$external_mode" in
     media)
@@ -658,6 +851,7 @@ ${main_header_block}"
 # external_mode=${external_mode}
 # domain=${domain}
 # listen_port=${listen_port}
+${https_meta}
 # upstream_url=${upstream_url}
 # stream_upstream_url=${stream_upstream_url}
 # source_site_url=${source_site_url}
@@ -681,10 +875,7 @@ server {
     http2 on;
     server_name ${domain};
 
-    ssl_certificate     ${SSL_DIR}/${domain}/fullchain.pem;
-    ssl_certificate_key ${SSL_DIR}/${domain}/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers off;
+${https_cert_block}
 
     location / {
         proxy_pass ${upstream_url};
@@ -737,6 +928,22 @@ EOF
   fi
 }
 
+# 若配置包含 ssl 监听，则必须同时包含证书指令，避免生成半截 HTTPS 配置
+ensure_ssl_directives_present() {
+  local conf_file="$1"
+
+  if grep -qE 'listen[[:space:]]+[^;]*[[:space:]]ssl([[:space:]]|;)' "$conf_file" 2>/dev/null; then
+    if ! grep -qE '^[[:space:]]*ssl_certificate[[:space:]]+' "$conf_file" 2>/dev/null; then
+      error "检测到 HTTPS 监听，但缺少 ssl_certificate：${conf_file}"
+      return 1
+    fi
+    if ! grep -qE '^[[:space:]]*ssl_certificate_key[[:space:]]+' "$conf_file" 2>/dev/null; then
+      error "检测到 HTTPS 监听，但缺少 ssl_certificate_key：${conf_file}"
+      return 1
+    fi
+  fi
+}
+
 apply_conf_with_rollback() {
   # 参数：临时文件、目标文件
   local tmp_conf="$1"
@@ -751,6 +958,16 @@ apply_conf_with_rollback() {
   fi
 
   ${SUDO} cp -a "$tmp_conf" "$target_conf"
+
+  if ! ensure_ssl_directives_present "$target_conf"; then
+    if [[ -f "$backup" ]]; then
+      ${SUDO} cp -a "$backup" "$target_conf"
+      ${SUDO} rm -f "$backup"
+    else
+      ${SUDO} rm -f "$target_conf"
+    fi
+    return 1
+  fi
 
   if test_output="$(${SUDO} nginx -t 2>&1)"; then
     reload_nginx_safe
@@ -829,6 +1046,7 @@ add_reverse_proxy() {
 
   target="$(conf_target_path "$domain" "$desired_port")"
   tmp="$(mktemp /tmp/nginxx-"${domain}".XXXXXX.conf)"
+  trap 'rm -f "${tmp:-}"' RETURN
 
   build_proxy_conf "$domain" "$create_port" "$backend_port" "$tmp"
   if apply_conf_with_rollback "$tmp" "$target"; then
@@ -903,8 +1121,8 @@ add_external_url_proxy() {
   create_port="$listen_port"
 
   read -rp "请输入外部上游 URL（http/https）: " upstream_url
-  if [[ ! "$upstream_url" =~ ^https?:// ]]; then
-    error "上游 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://example.com。"
+  if ! valid_url "$upstream_url"; then
+    error "上游 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符（{}\\;）。"
     return 1
   fi
 
@@ -912,15 +1130,15 @@ add_external_url_proxy() {
 
   if [[ "$external_mode" =~ ^emby_ ]]; then
     read -rp "请输入推流节点 URL（http/https）: " stream_upstream_url
-    if [[ ! "$stream_upstream_url" =~ ^https?:// ]]; then
-      error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://stream.example.com。"
+    if ! valid_url "$stream_upstream_url"; then
+      error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
       return 1
     fi
 
     read -rp "请输入源站公开 URL（用于重定向/替换，默认与主上游相同）: " source_site_url
     [[ -z "$source_site_url" ]] && source_site_url="$upstream_url"
-    if [[ ! "$source_site_url" =~ ^https?:// ]]; then
-      error "源站公开 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://emby.example.com。"
+    if ! valid_url "$source_site_url"; then
+      error "源站公开 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
       return 1
     fi
 
@@ -957,6 +1175,7 @@ add_external_url_proxy() {
 
   target="$(conf_target_path "$domain" "$desired_port")"
   tmp="$(mktemp /tmp/nginxx-external-"${domain}".XXXXXX.conf)"
+  trap 'rm -f "${tmp:-}"' RETURN
 
   build_external_proxy_conf "$domain" "$create_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url"
   if apply_conf_with_rollback "$tmp" "$target"; then
@@ -1009,8 +1228,24 @@ add_external_url_proxy() {
 }
 
 # ---------- 功能4：配置列表管理 ----------
+list_managed_conf_files() {
+  local include_disabled="${1:-0}"
+
+  if [[ "$include_disabled" == "1" ]]; then
+    find "$CONF_DIR" -maxdepth 1 -type f \( -name '*.conf' -o -name '*.conf.*' \) \
+      ! -name 'nginx_status.conf' \
+      ! -name 'acme-challenge-*.conf' \
+      -exec grep -l '^# managed_by=Nginx-X$' {} + 2>/dev/null | sort || true
+  else
+    find "$CONF_DIR" -maxdepth 1 -type f -name '*.conf' \
+      ! -name 'nginx_status.conf' \
+      ! -name 'acme-challenge-*.conf' \
+      -exec grep -l '^# managed_by=Nginx-X$' {} + 2>/dev/null | sort || true
+  fi
+}
+
 list_all_conf_files() {
-  find "$CONF_DIR" -maxdepth 1 -type f \( -name '*.conf' -o -name '*.conf.*' \) -printf '%f\n' 2>/dev/null | sort || true
+  list_managed_conf_files 1 | xargs -r -n1 basename
 }
 
 print_conf_list() {
@@ -1018,8 +1253,8 @@ print_conf_list() {
   local -a enabled_files disabled_files
 
   # 二级列表：先显示已启用（.conf），再显示已停用（.bak/其他后缀）
-  mapfile -t enabled_files < <(find "$CONF_DIR" -maxdepth 1 -type f -name '*.conf' -printf '%f\n' 2>/dev/null | sort || true)
-  mapfile -t disabled_files < <(find "$CONF_DIR" -maxdepth 1 -type f -name '*.conf.*' -printf '%f\n' 2>/dev/null | sort || true)
+  mapfile -t enabled_files < <(list_managed_conf_files 0 | xargs -r -n1 basename)
+  mapfile -t disabled_files < <(list_managed_conf_files 1 | xargs -r -n1 basename | grep -E '\.conf\..+$' || true)
 
   FILES=("${enabled_files[@]}" "${disabled_files[@]}")
 
@@ -1151,6 +1386,7 @@ modify_conf() {
   fi
 
   tmp="$(mktemp /tmp/nginxx-mod-"${new_domain}".XXXXXX.conf)"
+  trap 'rm -f "${tmp:-}"' RETURN
   build_proxy_conf "$new_domain" "$new_listen" "$new_backend" "$tmp"
 
   # 修改后默认写入 .conf；也可选择立即停用
@@ -1225,8 +1461,8 @@ modify_external_conf() {
 
   read -rp "新的主上游 URL（当前 ${current_upstream_url}）: " new_upstream_url
   [[ -z "$new_upstream_url" ]] && new_upstream_url="$current_upstream_url"
-  if [[ ! "$new_upstream_url" =~ ^https?:// ]]; then
-    error "主上游 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://example.com。"
+  if ! valid_url "$new_upstream_url"; then
+    error "主上游 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
     return 1
   fi
 
@@ -1240,16 +1476,16 @@ modify_external_conf() {
   if [[ "$new_mode" =~ ^emby_ ]]; then
     read -rp "新的推流节点 URL（当前 ${current_stream_upstream_url:-未设置}）: " input_stream
     [[ -n "$input_stream" ]] && new_stream_upstream_url="$input_stream"
-    if [[ ! "$new_stream_upstream_url" =~ ^https?:// ]]; then
-      error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://stream.example.com。"
+    if ! valid_url "$new_stream_upstream_url"; then
+      error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
       return 1
     fi
 
     read -rp "新的源站公开 URL（当前 ${current_source_site_url:-$new_upstream_url}）: " input_source
     [[ -n "$input_source" ]] && new_source_site_url="$input_source"
     [[ -z "$new_source_site_url" ]] && new_source_site_url="$new_upstream_url"
-    if [[ ! "$new_source_site_url" =~ ^https?:// ]]; then
-      error "源站公开 URL 格式不合法。必须以 http:// 或 https:// 开头，例如 https://emby.example.com。"
+    if ! valid_url "$new_source_site_url"; then
+      error "源站公开 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
       return 1
     fi
 
@@ -1294,6 +1530,7 @@ modify_external_conf() {
 
   new_target="$(conf_target_path "$new_domain" "$desired_port")"
   tmp="$(mktemp /tmp/nginxx-external-mod-"${new_domain}".XXXXXX.conf)"
+  trap 'rm -f "${tmp:-}"' RETURN
   build_external_proxy_conf "$new_domain" "$create_port" "$new_upstream_url" "$new_mode" "$tmp" "0" "$new_stream_upstream_url" "$new_source_site_url" "$new_referer_url"
 
   if apply_conf_with_rollback "$tmp" "$new_target"; then
@@ -1442,7 +1679,7 @@ config_file_action_menu() {
 config_manage_menu() {
   require_nginx_installed || {
     pause
-    return 1
+    return 0
   }
 
   while true; do
@@ -1494,6 +1731,7 @@ config_entry_menu() {
 
 # ---------- 功能5：证书管理（acme.sh） ----------
 load_email() {
+  ensure_state_dir
   if [[ -f "$EMAIL_CONF" ]]; then
     # shellcheck disable=SC1090
     . "$EMAIL_CONF"
@@ -1502,6 +1740,7 @@ load_email() {
 
 save_email() {
   local email="$1"
+  ensure_state_dir
   cat > "$EMAIL_CONF" <<EOF
 ACME_EMAIL="${email}"
 EOF
@@ -1609,7 +1848,34 @@ ensure_acme_location_for_domain_conf() {
   local -a matches
   local conf_file tmp_file
 
+  # Collect tmp files so early-return / errors won't leak /tmp files
+  local -a tmp_files=()
+  trap 'for f in "${tmp_files[@]}"; do rm -f "$f" 2>/dev/null || true; done' RETURN
+
+  # Primary: match our metadata line "# domain=<domain>"
   mapfile -t matches < <(awk -v d="$domain" 'FNR==1{found=0} $0=="# domain=" d {found=1} ENDFILE{if(found) print FILENAME}' "${CONF_DIR}"/*.conf 2>/dev/null || true)
+
+  # Fallback: match server_name token containing the domain (best-effort, avoids missing metadata)
+  if [[ ${#matches[@]} -eq 0 ]]; then
+    mapfile -t matches < <(awk -v d="$domain" '
+      BEGIN{in_server=0; hasDomain=0}
+      /server\s*\{/ {in_server=1; hasDomain=0}
+      in_server && index($0, "server_name") {
+        # Exact token match: server_name a b c;
+        line=$0
+        sub(/.*server_name[[:space:]]+/, "", line)
+        gsub(/;/, "", line)
+        n=split(line, a, /[[:space:]]+/)
+        for (i=1; i<=n; i++) {
+          if (a[i] == d) {hasDomain=1}
+        }
+      }
+      in_server && /}/ {
+        if (hasDomain) {print FILENAME; nextfile}
+        in_server=0
+      }
+    ' "${CONF_DIR}"/*.conf 2>/dev/null || true)
+  fi
   [[ ${#matches[@]} -gt 0 ]] || return 0
 
   for conf_file in "${matches[@]}"; do
@@ -1618,6 +1884,7 @@ ensure_acme_location_for_domain_conf() {
     fi
 
     tmp_file="$(mktemp /tmp/nginxx-acme-loc-"${domain}".XXXXXX.conf)"
+    tmp_files+=("$tmp_file")
     awk '
       BEGIN{inserted=0}
       {
@@ -1650,7 +1917,7 @@ ensure_http_challenge_server() {
     BEGIN{in_server=0; has80=0; hasDomain=0}
     /server\s*\{/ {in_server=1; has80=0; hasDomain=0}
     in_server && /listen[[:space:]]+80([[:space:]]|;)/ {has80=1}
-    in_server && $0 ~ "server_name[[:space:]]+" d "([[:space:]]|;)" {hasDomain=1}
+    in_server && index($0, "server_name") && index($0, d) {hasDomain=1}
     in_server && /}/ {
       if (has80 && hasDomain) {print "yes"; exit 0}
       in_server=0
@@ -1662,6 +1929,7 @@ ensure_http_challenge_server() {
 
   local tmp_challenge
   tmp_challenge="$(mktemp /tmp/.acme-challenge-"${domain}".XXXXXX.conf)"
+  trap 'rm -f "${tmp_challenge:-}"' RETURN
 
   cat > "$tmp_challenge" <<EOF
 server {
@@ -1721,10 +1989,10 @@ precheck_http01() {
   echo "$token" | ${SUDO} tee "$file_path" >/dev/null
 
   local_url="http://127.0.0.1/.well-known/acme-challenge/${token}"
-  local_body="$(curl -fsS --max-time 8 "$local_url" 2>/dev/null || true)"
+  local_body="$(curl -fsS --max-time 8 -H "Host: ${domain}" "$local_url" 2>/dev/null || true)"
   if [[ "$local_body" != "$token" ]]; then
     ${SUDO} rm -f "$file_path" 2>/dev/null || true
-    error "自检失败：本机 challenge 路径未命中（${local_url}）。"
+    error "自检失败：本机 challenge 路径未命中（${local_url}，Host: ${domain}）。"
     return 11
   fi
 
@@ -1745,7 +2013,7 @@ precheck_http01() {
 }
 
 issue_cert() {
-  local domain challenge_conf
+  local domain
   load_email
 
   if [[ -z "${ACME_EMAIL:-}" ]]; then
@@ -1758,6 +2026,27 @@ issue_cert() {
     error "域名格式不合法。请输入可签发证书的域名，例如 example.com。"
     return 1
   fi
+
+  _issue_cert_impl "$domain"
+}
+
+issue_cert_for_domain() {
+  # 参数：域名；用于"添加反向代理后自动申请证书"场景
+  local domain="$1"
+  load_email
+
+  if [[ -z "${ACME_EMAIL:-}" ]]; then
+    error "未设置邮箱，无法自动申请证书。请先在证书管理里设置邮箱。"
+    return 1
+  fi
+
+  _issue_cert_impl "$domain"
+}
+
+_issue_cert_impl() {
+  # 内部共享实现：签发证书（被 issue_cert 和 issue_cert_for_domain 调用）
+  local domain="$1"
+  local challenge_conf
 
   ensure_acme_location_for_domain_conf "$domain"
   challenge_conf="$(ensure_http_challenge_server "$domain")"
@@ -1809,7 +2098,7 @@ issue_cert() {
 
     if echo "$issue_output" | grep -qi 'rateLimited\|too many certificates'; then
       retry_after="$(echo "$issue_output" | sed -n 's/.*retry after \([^:]*UTC\).*/\1/p' | head -n1)"
-      error "证书申请失败：触发 Let\'s Encrypt 频率限制（429）。"
+      error "证书申请失败：触发 Let's Encrypt 频率限制（429）。"
       [[ -n "$retry_after" ]] && warn "可重试时间（UTC）：$retry_after"
       warn "这是 CA 侧限制，不是你服务器或端口配置问题。"
     else
@@ -1828,88 +2117,6 @@ issue_cert() {
 
   ensure_acme_cron
   info "证书申请并安装成功。"
-}
-
-issue_cert_for_domain() {
-  # 参数：域名；用于“添加反向代理后自动申请证书”场景
-  local domain="$1"
-  local challenge_conf
-  load_email
-
-  if [[ -z "${ACME_EMAIL:-}" ]]; then
-    error "未设置邮箱，无法自动申请证书。请先在证书管理里设置邮箱。"
-    return 1
-  fi
-
-  ensure_acme_location_for_domain_conf "$domain"
-  challenge_conf="$(ensure_http_challenge_server "$domain")"
-
-  # 确保挑战配置已生效
-  if ! reload_nginx_safe; then
-    cleanup_http_challenge_server "$challenge_conf"
-    error "证书申请前校验失败：Nginx 配置未生效。"
-    return 1
-  fi
-
-  local pre_rc=0
-  if precheck_http01 "$domain"; then
-    pre_rc=0
-  else
-    pre_rc=$?
-  fi
-  if (( pre_rc != 0 )); then
-    if [[ $pre_rc -eq 10 ]]; then
-      if ! confirm "自检存在风险，是否仍继续申请证书？"; then
-        cleanup_http_challenge_server "$challenge_conf"
-        reload_nginx_safe || true
-        info "已取消申请。"
-        return 1
-      fi
-      warn "你选择继续申请，将直接尝试签发。"
-    else
-      if ! confirm "自检失败（建议先修复），是否仍强制继续申请？"; then
-        cleanup_http_challenge_server "$challenge_conf"
-        reload_nginx_safe || true
-        info "已取消申请。"
-        return 1
-      fi
-      warn "你选择强制继续申请。"
-    fi
-  fi
-
-  ensure_acme_installed || return 1
-
-  note "开始为 ${domain} 自动申请证书（HTTP 验证）..."
-  "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
-  "$HOME/.acme.sh/acme.sh" --register-account -m "$ACME_EMAIL" >/dev/null 2>&1 || true
-
-  local issue_output retry_after
-  issue_output="$("$HOME/.acme.sh/acme.sh" --issue -d "$domain" --webroot /usr/share/nginx/html 2>&1)" || {
-    echo "$issue_output"
-    cleanup_http_challenge_server "$challenge_conf"
-    reload_nginx_safe || true
-
-    if echo "$issue_output" | grep -qi 'rateLimited\|too many certificates'; then
-      retry_after="$(echo "$issue_output" | sed -n 's/.*retry after \([^:]*UTC\).*/\1/p' | head -n1)"
-      error "自动申请证书失败：触发 Let\'s Encrypt 频率限制（429）。"
-      [[ -n "$retry_after" ]] && warn "可重试时间（UTC）：$retry_after"
-      warn "这是 CA 侧限制，不是你服务器或端口配置问题。"
-    else
-      error "自动申请证书失败。请确认域名已解析到本机、80 端口已放行，且没有被 CDN/防火墙拦截。"
-    fi
-    return 1
-  }
-
-  cleanup_http_challenge_server "$challenge_conf"
-  reload_nginx_safe || true
-
-  ${SUDO} mkdir -p "${SSL_DIR}/${domain}"
-  "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
-    --key-file "${SSL_DIR}/${domain}/privkey.pem" \
-    --fullchain-file "${SSL_DIR}/${domain}/fullchain.pem"
-
-  ensure_acme_cron
-  info "证书申请并安装成功。已开启自动续期任务。"
 }
 
 cert_list_action_menu() {
@@ -1931,7 +2138,7 @@ cert_list_action_menu() {
           if ! ensure_email_interactive; then
             error "邮箱未设置，无法重新申请。"
             pause
-            return 1
+            return 0
           fi
         fi
         run_menu_action issue_cert_for_domain "$domain"
@@ -1976,7 +2183,8 @@ cert_list_action_menu() {
 cert_list_menu() {
   if [[ ! -x "$HOME/.acme.sh/acme.sh" ]]; then
     warn "未检测到 acme.sh，请先申请证书。"
-    return 1
+    pause
+    return 0
   fi
 
   local -a certs
@@ -2102,7 +2310,7 @@ health_check_conf_file() {
 
   if [[ "$scheme" == "https" ]]; then
     # shellcheck disable=SC2016
-    tls_days="$(timeout 8s bash -lc 'echo | openssl s_client -servername "$0" -connect "$0:$1" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null' "$domain" "$listen_port" | sed 's/notAfter=//' | xargs -I{} date -d '{}' +%s 2>/dev/null | awk -v now="$(date +%s)" '{if($1>0) printf "%d", int(($1-now)/86400); else print "-"}' || true)"
+    tls_days="$(timeout 8s bash -c 'echo | openssl s_client -servername "$0" -connect "$0:$1" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null' "$domain" "$listen_port" | sed 's/notAfter=//' | xargs -I{} date -d '{}' +%s 2>/dev/null | awk -v now="$(date +%s)" '{if($1>0) printf "%d", int(($1-now)/86400); else print "-"}' || true)"
     [[ -z "$tls_days" ]] && tls_days="-"
   else
     tls_days="-"
@@ -2115,7 +2323,7 @@ health_check_conf_file() {
   elif [[ "$scheme" == "https" && "$verify_result" != "0" ]]; then
     status_label="证书校验失败"
     status_ok=2
-  elif [[ "$http_code" =~ ^401|403|404$ ]]; then
+  elif [[ "$http_code" =~ ^(401|403|404)$ ]]; then
     status_label="可访问但需确认"
     status_ok=1
   else
@@ -2195,7 +2403,7 @@ site_health_menu() {
     case "$c" in
       1)
         clear
-        mapfile -t confs < <(find "${CONF_DIR}" -maxdepth 1 -type f -name '*.conf' ! -name 'nginx_status.conf' 2>/dev/null | sort || true)
+        mapfile -t confs < <(list_managed_conf_files 0)
         if [[ ${#confs[@]} -eq 0 ]]; then
           warn "当前没有可检查的站点配置。请先创建站点。"
           pause
@@ -2219,7 +2427,7 @@ site_health_menu() {
         ;;
       2)
         clear
-        mapfile -t confs < <(find "${CONF_DIR}" -maxdepth 1 -type f -name '*.conf' ! -name 'nginx_status.conf' 2>/dev/null | sort || true)
+        mapfile -t confs < <(list_managed_conf_files 0)
         if [[ ${#confs[@]} -eq 0 ]]; then
           warn "当前没有可检查的站点配置。请先创建站点。"
           pause
@@ -2267,6 +2475,7 @@ disable_https_for_conf_file() {
     [[ -z "$external_mode" ]] && external_mode="normal"
 
     tmp="$(mktemp /tmp/nginxx-disable-https-"${domain}".XXXXXX.conf)"
+    trap 'rm -f "${tmp:-}"' RETURN
     build_external_proxy_conf "$domain" "$listen_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url"
     if apply_conf_with_rollback "$tmp" "$conf_file"; then
       info "HTTPS 已停用：$(basename "$conf_file")"
@@ -2278,10 +2487,10 @@ disable_https_for_conf_file() {
     return 1
   fi
 
-  listen_port="$(grep -E '^# listen_port=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# listen_port=//')"
+  listen_port="$(conf_meta_get "$conf_file" listen_port)"
   [[ -z "$listen_port" ]] && listen_port="80"
 
-  stream_mode="$(grep -E '^# stream_mode=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# stream_mode=//')"
+  stream_mode="$(conf_meta_get "$conf_file" stream_mode)"
   stream_block=""
   if [[ "$stream_mode" == "media" ]]; then
     stream_block=$(cat <<'BLOCK'
@@ -2315,6 +2524,7 @@ BLOCK
   fi
 
   tmp="$(mktemp /tmp/nginxx-disable-https-"${domain}".XXXXXX.conf)"
+  trap 'rm -f "${tmp:-}"' RETURN
   cat > "$tmp" <<EOF
 # managed_by=Nginx-X
 # domain=${domain}
@@ -2367,7 +2577,7 @@ enable_https_from_config_list() {
   local -a confs
   local idx conf_file domain
 
-  mapfile -t confs < <(find "${CONF_DIR}" -maxdepth 1 -type f -name '*.conf' 2>/dev/null | sort || true)
+  mapfile -t confs < <(list_managed_conf_files 0)
   if [[ ${#confs[@]} -eq 0 ]]; then
     warn "未找到可启用 HTTPS 的配置文件。"
     return 1
@@ -2469,7 +2679,7 @@ enable_https_for_conf_file() {
   local conf_file="$2"
   local force_port="${3:-}"
   local mode external_mode upstream_url stream_upstream_url source_site_url referer_url
-  local tmp listen_port redirect_suffix stream_mode stream_block
+  local tmp listen_port redirect_suffix stream_mode stream_block effective_https_port
 
   if [[ ! -f "$conf_file" ]]; then
     error "配置文件不存在：${conf_file}"
@@ -2482,9 +2692,14 @@ enable_https_for_conf_file() {
   fi
 
   # 优先读取配置注释中的监听端口，缺失时回退 443
-  listen_port="$(grep -E '^# listen_port=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# listen_port=//')"
+  listen_port="$(conf_meta_get "$conf_file" listen_port)"
   [[ -n "$force_port" ]] && listen_port="$force_port"
   [[ -z "$listen_port" ]] && listen_port="443"
+
+  effective_https_port="$listen_port"
+  if [[ "$effective_https_port" == "80" ]]; then
+    effective_https_port="443"
+  fi
 
   mode="$(conf_meta_get "$conf_file" mode)"
   if [[ "$mode" == "external" ]]; then
@@ -2496,9 +2711,10 @@ enable_https_for_conf_file() {
     [[ -z "$external_mode" ]] && external_mode="normal"
 
     tmp="$(mktemp /tmp/nginxx-https-"${domain}".XXXXXX.conf)"
-    build_external_proxy_conf "$domain" "$listen_port" "$upstream_url" "$external_mode" "$tmp" "1" "$stream_upstream_url" "$source_site_url" "$referer_url"
+    trap 'rm -f "${tmp:-}"' RETURN
+    build_external_proxy_conf "$domain" "$effective_https_port" "$upstream_url" "$external_mode" "$tmp" "1" "$stream_upstream_url" "$source_site_url" "$referer_url"
     if apply_conf_with_rollback "$tmp" "$conf_file"; then
-      info "HTTPS 已启用，且已配置 80 -> ${listen_port} 强制跳转。"
+      info "HTTPS 已启用，且已配置 80 -> ${effective_https_port} 强制跳转。"
       rm -f "$tmp"
       return 0
     fi
@@ -2507,13 +2723,13 @@ enable_https_for_conf_file() {
     return 1
   fi
 
-  if [[ "$listen_port" == "443" ]]; then
+  if [[ "$effective_https_port" == "443" ]]; then
     redirect_suffix=""
   else
-    redirect_suffix=":${listen_port}"
+    redirect_suffix=":${effective_https_port}"
   fi
 
-  stream_mode="$(grep -E '^# stream_mode=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# stream_mode=//')"
+  stream_mode="$(conf_meta_get "$conf_file" stream_mode)"
   stream_block=""
   if [[ "$stream_mode" == "media" ]]; then
     stream_block=$(cat <<'BLOCK'
@@ -2530,11 +2746,12 @@ BLOCK
   fi
 
   tmp="$(mktemp /tmp/nginxx-https-"${domain}".XXXXXX.conf)"
+  trap 'rm -f "${tmp:-}"' RETURN
 
   # 复用原配置上游：优先读取注释元数据，避免同端口多域名场景误取到错误上游
   local existing_upstream host_header ssl_sni_line backend_port_meta upstream_url_meta
-  upstream_url_meta="$(grep -E '^# upstream_url=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# upstream_url=//')"
-  backend_port_meta="$(grep -E '^# backend_port=' "$conf_file" 2>/dev/null | head -n1 | sed 's/^# backend_port=//')"
+  upstream_url_meta="$(conf_meta_get "$conf_file" upstream_url)"
+  backend_port_meta="$(conf_meta_get "$conf_file" backend_port)"
 
   if [[ -n "$upstream_url_meta" ]]; then
     existing_upstream="$upstream_url_meta"
@@ -2561,12 +2778,12 @@ BLOCK
     fi
   fi
 
-  # 生成 HTTPS 配置：继承原监听端口（支持非标端口，如 7777）
+  # 生成 HTTPS 配置：若原配置监听 80，则自动切到标准 443，避免 80 同时承担重定向与 SSL 监听
   cat > "$tmp" <<EOF
 # managed_by=Nginx-X
 # domain=${domain}
 # https_enabled=true
-# listen_port=${listen_port}
+# listen_port=${effective_https_port}
 # stream_mode=${stream_mode:-normal}
 
 server {
@@ -2584,7 +2801,7 @@ server {
 }
 
 server {
-    listen ${listen_port} ssl;
+    listen ${effective_https_port} ssl;
     http2 on;
     server_name ${domain};
 
@@ -2615,7 +2832,7 @@ ${ssl_sni_line}
 EOF
 
   if apply_conf_with_rollback "$tmp" "$conf_file"; then
-    info "HTTPS 已启用，且已配置 80 -> ${listen_port} 强制跳转。"
+    info "HTTPS 已启用，且已配置 80 -> ${effective_https_port} 强制跳转。"
     rm -f "$tmp"
     return 0
   fi
@@ -2627,7 +2844,7 @@ EOF
 cert_menu() {
   require_nginx_installed || {
     pause
-    return 1
+    return 0
   }
 
   while true; do
@@ -2661,6 +2878,7 @@ ensure_status_endpoint() {
 
   local tmp_status
   tmp_status="$(mktemp /tmp/nginxx-status.XXXXXX.conf)"
+  trap 'rm -f "${tmp_status:-}"' RETURN
 
   cat > "$tmp_status" <<'EOF'
 server {
@@ -2730,8 +2948,9 @@ show_nginx_realtime_status() {
       start_time="N/A"
     fi
 
-    rx="$(awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$3} END{print s+0}' /proc/net/dev 2>/dev/null)"
-    tx="$(awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$11} END{print s+0}' /proc/net/dev 2>/dev/null)"
+    # Strip leading whitespace so $1 is always the interface name
+    rx="$(sed 's/^[[:space:]]*//' /proc/net/dev 2>/dev/null | awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$2} END{print s+0}')"
+    tx="$(sed 's/^[[:space:]]*//' /proc/net/dev 2>/dev/null | awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$10} END{print s+0}')"
 
     if [[ $initialized -eq 1 ]]; then
       rx_rate="$(awk -v d=$((rx-prev_rx)) 'BEGIN{if(d<0)d=0; printf "%.1f", d/1024/1024}')"
@@ -2796,8 +3015,9 @@ show_traffic_stats() {
 
   while true; do
     local rx tx rx_rate tx_rate rx_total_mb tx_total_mb
-    rx="$(awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$3} END{print s+0}' /proc/net/dev 2>/dev/null)"
-    tx="$(awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$11} END{print s+0}' /proc/net/dev 2>/dev/null)"
+    # Strip leading whitespace so $1 is always the interface name
+    rx="$(sed 's/^[[:space:]]*//' /proc/net/dev 2>/dev/null | awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$2} END{print s+0}')"
+    tx="$(sed 's/^[[:space:]]*//' /proc/net/dev 2>/dev/null | awk -F'[: ]+' 'NR>2 && $1!="lo" {s+=$10} END{print s+0}')"
 
     if [[ $initialized -eq 1 ]]; then
       rx_rate="$(awk -v d=$((rx-prev_rx)) 'BEGIN{if(d<0)d=0; printf "%.2f", d/1024/1024}')"
@@ -2828,7 +3048,7 @@ TX速率: ${tx_rate} MB/s
 当前启用配置流量（最近5000日志，优先按 Host 专用日志统计）
 EOF
 
-    mapfile -t enabled_confs < <(find "${CONF_DIR}" -maxdepth 1 -type f -name '*.conf' 2>/dev/null | sort || true)
+    mapfile -t enabled_confs < <(list_managed_conf_files 0)
     if [[ ${#enabled_confs[@]} -eq 0 ]]; then
       echo "- 无启用配置"
     else
@@ -2840,8 +3060,8 @@ EOF
           req_count="$(tail -n 5000 "$host_log_file" 2>/dev/null | awk -v d="$domain" '$1==d {c++} END{print c+0}')"
           bytes_sum="$(tail -n 5000 "$host_log_file" 2>/dev/null | awk -v d="$domain" '$1==d && $2 ~ /^[0-9]+$/ {s+=$2} END{print s+0}')"
         elif [[ -f "$log_file" && -n "$domain" ]]; then
-          req_count="$( (tail -n 5000 "$log_file" 2>/dev/null | grep -F -c "$domain") || true )"
-          bytes_sum="$( (tail -n 5000 "$log_file" 2>/dev/null | grep -F "$domain" | awk '{if($10 ~ /^[0-9]+$/) s+=$10} END{print s+0}') || true )"
+          req_count="$(tail -n 5000 "$log_file" 2>/dev/null | grep -F -c "$domain" || true)"
+          bytes_sum="$(tail -n 5000 "$log_file" 2>/dev/null | grep -F "$domain" | awk '{if($10 ~ /^[0-9]+$/) s+=$10} END{print s+0}' || true)"
         else
           req_count="0"
           bytes_sum="0"
@@ -2869,6 +3089,11 @@ EOF
 }
 
 realtime_info_menu() {
+  require_nginx_installed || {
+    pause
+    return 0
+  }
+
   while true; do
     clear
     echo "========== 实时信息 =========="
@@ -2906,13 +3131,17 @@ uninstall_script_only() {
   fi
 
   # 2) 清理脚本目录下运行状态文件
-  rm -f "${SCRIPT_DIR}/.email.conf" 2>/dev/null || true
+  rm -f "$EMAIL_CONF" 2>/dev/null || true
 
-  # 3) 给出手动删除路径，避免后台自删失败难排查
+  # 3) 给出手动删除路径（仅当不在系统通用 bin 目录），避免误导用户去清理 /usr/local/bin
   local dir_to_remove
   dir_to_remove="$(realpath "$SCRIPT_DIR")"
   if [[ -n "$dir_to_remove" && "$dir_to_remove" != "/" ]]; then
-    warn "脚本目录未自动删除，请按需手动清理：${dir_to_remove}"
+    if [[ "$dir_to_remove" == "/usr/local/bin" || "$dir_to_remove" == "/usr/local/bin/"* ]]; then
+      :
+    else
+      warn "脚本目录未自动删除，请按需手动清理：${dir_to_remove}"
+    fi
   fi
 
   info "本脚本卸载完成。"
@@ -2955,8 +3184,20 @@ uninstall_nginx_only() {
       ;;
   esac
 
-  ${SUDO} rm -rf /etc/nginx /var/log/nginx /var/cache/nginx /usr/share/nginx 2>/dev/null || true
-  info "Nginx 及其配置已清理完成。"
+  ${SUDO} rm -rf /etc/nginx /var/log/nginx /var/cache/nginx /usr/share/nginx/html /usr/share/nginx 2>/dev/null || true
+
+  # Double-check if any core dirs still exist (best-effort)
+  local -a leftovers=()
+  for p in /etc/nginx /var/log/nginx /var/cache/nginx /usr/share/nginx; do
+    if [[ -e "$p" ]]; then
+      leftovers+=("$p")
+    fi
+  done
+  if [[ ${#leftovers[@]} -gt 0 ]]; then
+    warn "已尝试清理 Nginx 目录，但仍检测到残留：${leftovers[*]}（可能被其他程序占用或权限限制）"
+  else
+    info "Nginx 及其配置已清理完成。"
+  fi
 }
 
 uninstall_acme_only() {

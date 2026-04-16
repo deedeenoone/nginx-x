@@ -22,3 +22,7 @@ jobs:
       - name: ShellCheck
         run: |
           shellcheck -x nx.sh install.sh
+
+      - name: Run regression tests
+        run: |
+          bash tests/https_config_regression.sh
