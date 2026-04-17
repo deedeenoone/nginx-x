@@ -29,6 +29,7 @@ Notes:
 - First run clones to `/opt/Nginx-X`
 - Subsequent runs pull latest automatically
 - If `/opt/Nginx-X` exists but isn't a git repo, installer prompts for confirmation
+- Network/software source errors are reported explicitly, not silently skipped
 
 > **After install, run: `nx`**
 
@@ -46,16 +47,16 @@ Notes:
 
 - Auto-detect existing Nginx installation
 - Install dependencies: `curl wget socat cron`
-- Install official Nginx stable from nginx.org
+- Install official Nginx stable (uses nginx.org official source, HTTPS)
 - Disable default.conf to avoid conflicts
 - Create SSL directory: `/etc/nginx/ssl/`
-- Compare local vs latest online version
+- Compare local vs latest online version (falls back to package manager if nginx.org unreachable)
 - Backup `/etc/nginx/` before upgrades
 - Auto validate and reload after upgrade
 
 ### 2. Config Management
 
-Sub-menu: `Add Config` / `External Proxy` / `Config List`
+Sub-menu: `Add Config` / `External Proxy` / `Config List` / `Import Existing Config`
 
 **Add Config:**
 - Input domain or IPv4, listen port, backend port
@@ -79,13 +80,22 @@ Sub-menu: `Add Config` / `External Proxy` / `Config List`
 - Swap proxy mode while keeping HTTPS联动
 - Auto issue certificate when domain changes
 
+**Import Existing Config:**
+- Auto-scan `conf.d/`, `sites-enabled/`, `sites-available/` directories
+-逐个确认导入 unmanaged Nginx configs
+- Auto-extract domain, port, backend address, HTTPS status metadata
+- Does not modify existing Nginx directives
+- `sites-available` configs are copied to `conf.d/`, symlinks in `sites-enabled/` are removed
+- Disabled configs (`.bak`, etc.) are not re-imported (deduplicated by domain+port)
+- Auto-detect and prompt to import existing configs after first Nginx install
+
 **HTTPS enable:**
 - If certificate exists: confirm to enable HTTPS
 - If no certificate: auto issue + enable HTTPS (80→443)
 
 ### 3. Certificate Management
 
-- Set email (persisted to `.email.conf`)
+- Set email (persisted to `${XDG_CONFIG_HOME:-$HOME/.config}/nginxx/email.conf`)
 - Auto install acme.sh, issue cert via HTTP-01
 - HTTP-01 self-check before issuance (DNS/80 listener/challenge path/domain resolution)
 - Cert list with renewal status
@@ -124,7 +134,13 @@ Sub-menu: `Live Status` / `Traffic Stats` / `Health Check`
 - Certificate issuance only supports HTTP-01 (no DNS API for wildcard certs)
 - HTTP-01 self-check may show "soft fail but actually works" behind CDN/NAT
 - Traffic stats are estimates unless `/var/log/nginx/access.host.log` is configured
-- No full E2E tests; basic syntax check + ShellCheck CI only
+- No full E2E tests; basic syntax check, ShellCheck, and HTTPS config regression script
+
+## Error Handling
+
+- Menu entries missing prerequisites show reason and return to previous level (no abrupt `set -e` exits)
+- Install/upgrade paths report explicit errors for: network issues, GitHub unreachable, software source errors, signing key download failures
+- Certificate email saved to user config directory, not script install directory (avoids failure if `/usr/local/bin` is not writable)
 
 ## Recommended Host-specific Log Format
 
@@ -143,6 +159,7 @@ GitHub Actions CI:
 bash -n nx.sh
 bash -n install.sh
 shellcheck -x nx.sh install.sh
+bash tests/https_config_regression.sh
 ```
 
 ## UI Conventions
